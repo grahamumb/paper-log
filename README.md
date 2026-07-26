@@ -32,6 +32,21 @@ pip install -e '.[dev]'          # + the test suite
 
 ## Quick start
 
+The easiest way to make a notebook is to look at it while you decide:
+
+```bash
+paperlog ui        # a form and a live PDF preview, on localhost
+```
+
+![the design UI](docs/ui.png)
+
+Pick a paper size, ruling and margins and watch the page redraw; the panel
+above the preview shows the writing area and, importantly, how big each QR
+module ends up. Press **Download notebook** for a zip with the print-ready PDF,
+its manifest, and the config that made them.
+
+From the command line instead:
+
 ```bash
 paperlog presets                             # sizes, rulings, ready-made recipes
 paperlog build --preset a5-dot --out j.pdf   # a 64-page A5 dot-grid journal
@@ -43,6 +58,14 @@ Or start from a config file and edit it:
 ```bash
 paperlog init -o journal.yaml
 paperlog build -c journal.yaml --out journal.pdf
+```
+
+### The whole loop
+
+```
+paperlog ui  ─→  print  ─→  write  ─→  photograph  ─→  paperlog scan  ─→  archive
+     │                                                       │
+     └────────── notebook id ties the two ends together ─────┘
 ```
 
 Each build writes two files: `journal.pdf` to print, and
@@ -177,8 +200,7 @@ confidence. Any of them tells you *which page it is* — that never degrades.
 With four codes in frame the flattening lands at 0.13–0.17mm RMS across the
 whole page.
 
-## Scanning: sizes and resolution
-## Scanning: sizes and resolution
+## Flatbed scanning
 
 If you use a flatbed rather than a phone, everything gets easier. Reliability
 comes down to one number: **the printed size of a single QR module**. The
@@ -345,6 +367,17 @@ Print double-sided flipping on the **short edge**, stack the sheets in order,
 fold the pile in half, staple through the spine. Two A5 pages make an A4 sheet;
 two half-letter make letter. Page counts are padded up to a multiple of 4,
 since that is what a folded sheet holds.
+
+## The design UI
+
+`paperlog ui` serves a form with a live preview at
+<http://127.0.0.1:8765>. It is deliberately dependency-free — the server is
+Python's own `http.server`, and the preview is the real PDF rendered by the
+browser, so there is no web framework and no JavaScript to install.
+
+It binds to loopback only and has no authentication, which is the right trade
+for a tool one person runs on their own machine. Don't put it on a public
+interface with `--host`.
 
 ## Python API
 

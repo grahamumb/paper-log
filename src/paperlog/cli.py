@@ -411,6 +411,13 @@ def _default_manifest_paths(photos: Sequence[Path]) -> List[Path]:
     return seen
 
 
+def command_ui(args: argparse.Namespace) -> int:
+    from .webui import serve
+
+    serve(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def command_presets(args: argparse.Namespace) -> int:
     print("presets:")
     for name, preset in sorted(PRESETS.items()):
@@ -485,6 +492,12 @@ def build_parser() -> argparse.ArgumentParser:
                           help="even out the lighting (default: flatten)")
     scan_cmd.add_argument("--pdf", type=Path, help="also bind the pages into a PDF, in order")
     scan_cmd.set_defaults(func=command_scan)
+
+    ui_cmd = subparsers.add_parser("ui", help="design a notebook in the browser, with a live preview")
+    ui_cmd.add_argument("--port", type=int, default=8765)
+    ui_cmd.add_argument("--host", default="127.0.0.1", help="loopback by default; there is no auth")
+    ui_cmd.add_argument("--no-browser", action="store_true", help="do not open a browser window")
+    ui_cmd.set_defaults(func=command_ui)
 
     presets_cmd = subparsers.add_parser("presets", help="list presets, page sizes and rulings")
     presets_cmd.set_defaults(func=command_presets)
