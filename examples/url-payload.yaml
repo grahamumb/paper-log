@@ -1,0 +1,42 @@
+# A5 journal whose codes are links rather than bare tokens.
+#
+#   paperlog build -c examples/url-payload.yaml --out linked.pdf
+#
+# Pointing a phone camera at a page opens the URL, which is handy if you run
+# something at the other end that shows the scanned page. The cost is density:
+# the URL prefix pushes the symbol from 25x25 modules to 33x33, so the code is
+# enlarged to 16mm to keep each module at 0.43mm. The margins grow to
+# match -- 16mm of code plus a 5mm inset needs 21mm of clearance in one axis
+# at each corner that carries one.
+#
+# `paperlog decode` still reads these: it pulls the token out of the URL.
+
+notebook_id: K7M2QX4A
+title: "Linked notes"
+pages: 48
+page_size: a5
+
+margins:
+  top: 22mm
+  bottom: 22mm
+  inner: 22mm
+  outer: 14mm
+
+ruling:
+  style: ruled
+  spacing: 7mm
+  margin_rule: true
+  margin_rule_offset: 14mm
+
+qr:
+  corners: [TL, BR]
+  size: 16mm
+  inset: 5mm
+  payload: "https://notes.example/p/{token}"
+  error_correction: m
+
+furniture:
+  date_line: true
+  date_label: "date / topic"
+  page_number: true
+  page_number_format: "{notebook} · {page}"

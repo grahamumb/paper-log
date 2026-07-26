@@ -1,0 +1,47 @@
+# A pocket notebook printed as a saddle-stitched booklet.
+#
+#   paperlog build -c examples/pocket-booklet.yaml --out pocket.pdf
+#
+# Two 89x140mm pages sit side by side on a 178x140mm sheet. Print
+# double-sided flipping on the short edge, fold the stack in half, staple
+# through the spine.
+#
+# The margins are tighter than the defaults, so the codes are shrunk to 12mm
+# and pulled closer to the paper edge to stay clear of the dot grid. That
+# still leaves 0.41mm per module -- above the 0.4mm threshold, but scan these
+# at 300dpi rather than 200.
+
+notebook_id: K7M2QX4A
+title: "Pocket log"
+pages: 32
+duplex: true
+page_size: pocket
+imposition: booklet
+
+margins:
+  top: 16mm
+  bottom: 16mm
+  inner: 14mm
+  outer: 9mm
+
+ruling:
+  style: dotted
+  spacing: 5mm
+  dot_radius: 0.3
+  color: "#b0bac4"
+
+qr:
+  corners: [TL, BR]
+  size: 12mm
+  inset: 3mm
+  caption: true       # a human-readable id under each code, for filing by eye
+
+fiducials:
+  style: bracket
+  size: 4mm
+  inset: 3mm
+
+furniture:
+  date_line: true
+  page_number: true
+  size: 6
