@@ -25,8 +25,9 @@ if a code would land on top of your writing or come out too small to scan.
 ## Install
 
 ```bash
-pip install -e .                 # generating journals
-pip install -e '.[verify]'       # + reading the codes back off a PDF
+pip install -e .                 # making journals
+pip install -e '.[verify]'       # + `paperlog scan` and `paperlog verify`
+pip install -e '.[verify,heic]'  # + iPhone HEIC photographs
 pip install -e '.[dev]'          # + the test suite
 ```
 
@@ -60,13 +61,54 @@ paperlog init -o journal.yaml
 paperlog build -c journal.yaml --out journal.pdf
 ```
 
-### The whole loop
+## Using it end to end
 
+```bash
+# 1. make a notebook, however you like
+paperlog ui                                    # or: paperlog build --preset a5-dot
+#    -> journal.pdf + journal.manifest.json
+#    -> and a copy filed in ~/.paperlog so step 4 can find it later
+
+# 2. print it, double-sided, at 100% scale (no "fit to page")
+
+# 3. write in it. photograph pages whenever — any order, any angle, any way up.
+#    airdrop / copy them to a folder.
+
+# 4. read them back
+paperlog scan photos/ --pdf notebook.pdf
+#    -> pages/K7M2QX/K7M2QX-p0001F.png, ...p0002B.png, ...
+#    -> notebook.pdf, the pages in order
 ```
-paperlog ui  ─→  print  ─→  write  ─→  photograph  ─→  paperlog scan  ─→  archive
-     │                                                       │
-     └────────── notebook id ties the two ends together ─────┘
+
+Step 4 takes no arguments because of step 1: building a notebook files a copy
+of its manifest in `~/.paperlog`, and `paperlog scan` looks there. The manifest
+is what says where the codes sit on the paper, so without it a photograph
+cannot be turned back into a page — and "where did I put that file" is a
+question that gets harder a year after printing.
+
+```console
+$ paperlog notebooks
+2 notebook(s) in /home/you/.paperlog
+  K7M2QX     64 pages  2026-03-02  Field notes
+  8QR41M     32 pages  2025-11-19
 ```
+
+Printed a notebook on another machine, or lost the library? Register its
+manifest once with `paperlog notebooks --add path/to/journal.manifest.json`.
+`--no-library` on either command opts out entirely, and `PAPERLOG_HOME`
+moves it somewhere else.
+
+### Practical notes
+
+- **iPhone photos are HEIC**, which OpenCV cannot read. `pip install
+  'paper-log[heic]'` handles it, or set Settings → Camera → Formats → Most
+  Compatible to shoot JPEG. paper-log says which, rather than just failing.
+- **Fill the frame with the page.** That is the single thing that decides
+  whether the codes are readable — see the table below.
+- **Rotation is fine**, sideways or upside down; EXIF rotation is honoured too.
+- **Reshoot freely.** A second photo of the same page replaces the first if it
+  is better, rather than making a second file.
+- **An open spread works** — both pages come out as separate files.
 
 Each build writes two files: `journal.pdf` to print, and
 `journal.manifest.json` listing every page and the exact string in each of its

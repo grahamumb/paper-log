@@ -15,14 +15,38 @@ from __future__ import annotations
 
 import pytest
 
-cv2 = pytest.importorskip("cv2", reason="needs the [verify] extras")
-numpy = pytest.importorskip("numpy", reason="needs the [verify] extras")
-pdfium = pytest.importorskip("pypdfium2", reason="needs the [verify] extras")
+from paperlog.library import HOME_VARIABLE
+
+
+@pytest.fixture(autouse=True)
+def isolated_library(tmp_path, monkeypatch):
+    """Never let a test write into the real ~/.paperlog.
+
+    ``paperlog build`` files a copy of every manifest it makes, which is the
+    right behaviour for a person and quite wrong for a test suite -- without
+    this, running the tests litters the developer's home directory with
+    notebooks that do not exist.
+    """
+    monkeypatch.setenv(HOME_VARIABLE, str(tmp_path / "paperlog-home"))
+
+
+def _backend():
+    """Import the capture backend, skipping the test if it is not installed.
+
+    Done inside fixtures rather than at module scope: an ``importorskip`` at
+    the top of a conftest aborts collection for the whole suite, including the
+    many tests that need nothing more than reportlab.
+    """
+    cv2 = pytest.importorskip("cv2", reason="needs the [verify] extras")
+    numpy = pytest.importorskip("numpy", reason="needs the [verify] extras")
+    pdfium = pytest.importorskip("pypdfium2", reason="needs the [verify] extras")
+    return cv2, numpy, pdfium
 
 
 @pytest.fixture
 def render_page():
     """Rasterise one page of a PDF, as the printer would put it on paper."""
+    _, numpy, pdfium = _backend()
 
     def _render(pdf_path, index=0, dpi=300):
         document = pdfium.PdfDocument(str(pdf_path))
@@ -55,6 +79,7 @@ def photograph(
     since it decides how many pixels each QR module gets. ``tilt`` is how far
     off square-on the camera is, as a fraction of the page.
     """
+    cv2, numpy, _ = _backend()
     rng = numpy.random.default_rng(seed)
     height, page_width = page.shape
     source = numpy.float32(

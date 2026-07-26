@@ -131,8 +131,9 @@ def test_a_detector_crash_on_one_tile_does_not_lose_the_photograph(
     notebook, render_page, phone
 ):
     """OpenCV raises out of its own internals on some inputs -- a convexHull
-    assertion, roughly one photograph in six with this simulator. A tile the
-    detector cannot cope with has to count as a miss, not an exception."""
+    assertion. Rare (about one simulated photograph in forty) but fatal if
+    unguarded, and seed 3 is a case that triggers it: a tile the detector
+    cannot cope with has to count as a miss, not an exception."""
     _, result, manifests = notebook
     picture = phone(render_page(result.pdf_path, 0), seed=3)
     page = flatten(picture, manifests)[0]
@@ -297,3 +298,69 @@ def test_recovered_pages_bind_back_into_a_pdf(notebook, render_page, phone, tmp_
         assert height == pytest.approx(210 / 25.4 * 72, abs=1)
     finally:
         document.close()
+
+
+# -- getting photographs off a phone ---------------------------------------
+
+
+def test_reads_a_heic_photograph(notebook, render_page, phone, tmp_path):
+    """iPhones shoot HEIC by default and OpenCV cannot read it.
+
+    Without this the primary workflow -- photograph pages on a phone -- fails
+    on every single file.
+    """
+    pillow_heif = pytest.importorskip("pillow_heif", reason="needs the [heic] extras")
+    from PIL import Image
+
+    pillow_heif.register_heif_opener()
+    _, result, manifests = notebook
+    path = tmp_path / "IMG_0042.HEIC"
+    Image.fromarray(phone(render_page(result.pdf_path, 1), seed=2)).convert("RGB").save(
+        path, quality=85
+    )
+
+    from paperlog.capture import read_image
+
+    pages = flatten(read_image(path), manifests)
+    assert pages[0].ref.page == 2
+    assert pages[0].confident
+
+
+def test_heic_without_the_extra_says_what_to_install(notebook, tmp_path, monkeypatch):
+    import paperlog.capture as capture
+
+    monkeypatch.setattr(capture, "_register_heif", lambda: False)
+    path = tmp_path / "IMG_0001.heic"
+    path.write_bytes(b"\x00\x00\x00 ftypheic" + b"\x00" * 64)
+
+    with pytest.raises(CaptureError, match="pillow-heif"):
+        capture.read_image(path)
+
+
+def test_exif_rotation_is_applied(notebook, render_page, phone, tmp_path):
+    """Phones record rotation in EXIF rather than rotating the pixels."""
+    from PIL import Image
+
+    from paperlog.capture import read_image
+
+    _, result, manifests = notebook
+    picture = phone(render_page(result.pdf_path, 0), seed=13)
+    image = Image.fromarray(picture)
+    path = tmp_path / "rotated.jpg"
+    # Orientation 6 means "rotate 90 CW to display".
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(path, exif=exif)
+
+    loaded = read_image(path)
+    assert loaded.shape[:2] == picture.shape[:2][::-1]
+    assert flatten(loaded, manifests)[0].ref.page == 1
+
+
+def test_a_corrupt_image_file_is_reported_not_raised(notebook, tmp_path):
+    from paperlog.capture import read_image
+
+    path = tmp_path / "truncated.jpg"
+    path.write_bytes(b"\xff\xd8\xff\xe0" + b"garbage" * 20)
+    with pytest.raises(CaptureError):
+        read_image(path)

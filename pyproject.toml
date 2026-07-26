@@ -15,9 +15,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# `paperlog verify` rasterises a finished PDF and decodes the codes back off it.
-verify = ["pypdfium2>=4.0", "opencv-python-headless>=4.8", "numpy>=1.24"]
-dev = ["pytest>=7.0", "paper-log[verify]"]
+# `paperlog verify` rasterises a finished PDF and decodes the codes back off it;
+# `paperlog scan` reads photographs. Same backend, so one extra covers both.
+verify = ["pypdfium2>=4.0", "opencv-python-headless>=4.8", "numpy>=1.24", "pillow>=10.0"]
+# iPhones shoot HEIC by default and OpenCV cannot read it.
+heic = ["pillow-heif>=0.13"]
+dev = ["pytest>=7.0", "paper-log[verify]", "paper-log[heic]"]
 
 [project.scripts]
 paperlog = "paperlog.cli:main"

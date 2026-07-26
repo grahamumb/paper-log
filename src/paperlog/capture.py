@@ -115,10 +115,11 @@ def _detect_in(detector, image, offset: Tuple[int, int]) -> List[Tuple[str, obje
     """Decode symbols in one image, returning payloads with absolute quads.
 
     Both detector calls are guarded. OpenCV does not merely fail to find a
-    symbol on awkward input -- it raises out of its own internals (a convexHull
-    assertion, for one) on perhaps one photograph in six. A detector that
-    cannot read a tile is a miss, not a reason to abandon the photograph, and
-    the other tiles usually find the code anyway.
+    symbol on awkward input -- it raises out of its own internals, a convexHull
+    assertion being the one seen here. Measured over 400 detector calls on
+    simulated photographs it fired once, affecting one photo in forty; the
+    guard turns that into a miss on one tile rather than a lost photograph,
+    and the remaining tiles find the code anyway.
     """
     found: List[Tuple[str, object]] = []
     ox, oy = offset
@@ -486,13 +487,57 @@ def enhance(image, mode: str = "flatten"):
     return numpy.clip(curved, 0, 255).astype(numpy.uint8)
 
 
+#: Formats OpenCV reads directly. HEIC is deliberately absent: iPhones shoot it
+#: by default, and OpenCV is almost never built with a HEIF decoder.
+HEIF_SUFFIXES = {".heic", ".heif", ".hif"}
+
+
+def _register_heif() -> bool:
+    """Teach Pillow about HEIC, if pillow-heif is installed."""
+    try:
+        import pillow_heif
+    except ImportError:
+        return False
+    pillow_heif.register_heif_opener()
+    return True
+
+
 def read_image(path: Path):
-    """Load a photograph as grayscale."""
-    cv2, _, _ = load_backend()
-    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise CaptureError(f"{path}: not an image this build of OpenCV can read")
-    return image
+    """Load a photograph as grayscale.
+
+    Goes through Pillow when OpenCV cannot read the file, which is what makes
+    iPhone photographs work: HEIC is the default capture format on iOS and
+    almost no OpenCV build ships a HEIF decoder.
+    """
+    cv2, numpy, _ = load_backend()
+    path = Path(path)
+
+    image = None
+    if path.suffix.lower() not in HEIF_SUFFIXES:
+        image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if image is not None:
+        return image
+
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        Image = None
+
+    if Image is not None:
+        if path.suffix.lower() in HEIF_SUFFIXES and not _register_heif():
+            raise CaptureError(
+                f"{path.name}: HEIC photographs need one more package — "
+                "`pip install pillow-heif`. (Or set your phone to shoot JPEG: "
+                "on iOS, Settings > Camera > Formats > Most Compatible.)"
+            )
+        try:
+            with Image.open(path) as handle:
+                # Phones record rotation in EXIF rather than rotating pixels.
+                return numpy.asarray(ImageOps.exif_transpose(handle).convert("L"))
+        except Exception as exc:
+            raise CaptureError(f"{path.name}: cannot read this image ({exc})") from None
+
+    raise CaptureError(f"{path.name}: not an image this build of OpenCV can read")
 
 
 def write_image(image, path: Path) -> Path:

@@ -126,14 +126,17 @@ class PageScan:
 
 
 def _decode_multi(detector, image) -> List[str]:
-    found, texts, _, _ = detector.detectAndDecodeMulti(image)
+    try:
+        found, texts, _, _ = detector.detectAndDecodeMulti(image)
+    except Exception:  # a decoder failure is a miss, not a crash
+        return []
     return [text for text in (texts or []) if text] if found else []
 
 
 def _decode_one(detector, image) -> List[str]:
     try:
         text, _, _ = detector.detectAndDecode(image)
-    except Exception:  # a decoder failure is a miss, not a crash
+    except Exception:
         return []
     return [text] if text else []
 

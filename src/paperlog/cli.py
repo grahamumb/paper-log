@@ -115,6 +115,8 @@ def _add_build_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--preset", choices=sorted(PRESETS), help="start from a named preset")
     parser.add_argument("--manifest", type=Path, help="manifest path (default: alongside the PDF)")
     parser.add_argument("--no-manifest", action="store_true", help="skip writing the manifest")
+    parser.add_argument("--no-library", action="store_true",
+                        help="do not file a copy of the manifest in ~/.paperlog")
     parser.add_argument("--dry-run", action="store_true", help="validate and report, write nothing")
 
     page = parser.add_argument_group("page")
@@ -248,6 +250,12 @@ def command_build(args: argparse.Namespace) -> int:
     print(f"wrote     {result.pdf_path}")
     if result.manifest_path:
         print(f"          {result.manifest_path}")
+        if not args.no_library:
+            from .library import remember
+
+            filed = remember(result.manifest_path)
+            if filed:
+                print(f"filed     {filed}  (so `paperlog scan` can find it later)")
     return 0
 
 
@@ -346,16 +354,20 @@ def command_scan(args: argparse.Namespace) -> int:
         print("error: no images to scan", file=sys.stderr)
         return 1
 
-    sources = args.manifest or _default_manifest_paths(photos)
+    from .library import load as load_library
+
     try:
-        manifests = load_manifests(sources)
+        manifests = dict(load_library()) if not args.no_library else {}
+        manifests.update(load_manifests(args.manifest or _default_manifest_paths(photos)))
     except (CaptureError, BackendMissing) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if not manifests:
         print(
-            "error: no manifests found. Pass --manifest with the .manifest.json "
-            "written next to the journal PDF.",
+            "error: no manifests found. paper-log needs the .manifest.json that "
+            "was written beside the journal PDF -- it says where the codes sit "
+            "on the page. Pass it with --manifest, or run `paperlog notebooks "
+            "--add <file>` once to register it.",
             file=sys.stderr,
         )
         return 1
@@ -415,6 +427,37 @@ def command_ui(args: argparse.Namespace) -> int:
     from .webui import serve
 
     serve(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
+def command_notebooks(args: argparse.Namespace) -> int:
+    from .library import entries, forget, home, remember
+
+    if args.add:
+        filed = remember(args.add)
+        if not filed:
+            print(f"error: {args.add} is not a readable manifest", file=sys.stderr)
+            return 1
+        print(f"registered {filed}")
+        return 0
+
+    if args.forget:
+        if forget(args.forget):
+            print(f"forgot {args.forget.upper()}")
+            return 0
+        print(f"error: {args.forget.upper()} is not in the library", file=sys.stderr)
+        return 1
+
+    known = entries()
+    if not known:
+        print(f"no notebooks registered in {home()}")
+        print("build one, or register an existing manifest with --add <file>")
+        return 0
+
+    print(f"{len(known)} notebook(s) in {home()}")
+    for entry in known:
+        created = entry.created[:10] if entry.created else ""
+        print(f"  {entry.notebook_id:<8} {entry.pages:>4} pages  {created}  {entry.title}")
     return 0
 
 
@@ -491,6 +534,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan_cmd.add_argument("--enhance", choices=("flatten", "scan", "none"), default="flatten",
                           help="even out the lighting (default: flatten)")
     scan_cmd.add_argument("--pdf", type=Path, help="also bind the pages into a PDF, in order")
+    scan_cmd.add_argument("--no-library", action="store_true",
+                          help="ignore the notebooks registered in ~/.paperlog")
     scan_cmd.set_defaults(func=command_scan)
 
     ui_cmd = subparsers.add_parser("ui", help="design a notebook in the browser, with a live preview")
@@ -498,6 +543,14 @@ def build_parser() -> argparse.ArgumentParser:
     ui_cmd.add_argument("--host", default="127.0.0.1", help="loopback by default; there is no auth")
     ui_cmd.add_argument("--no-browser", action="store_true", help="do not open a browser window")
     ui_cmd.set_defaults(func=command_ui)
+
+    notebooks_cmd = subparsers.add_parser(
+        "notebooks", help="list the notebooks paperlog knows how to scan"
+    )
+    notebooks_cmd.add_argument("--add", type=Path, metavar="MANIFEST",
+                               help="register a manifest built elsewhere")
+    notebooks_cmd.add_argument("--forget", metavar="ID", help="drop a notebook from the library")
+    notebooks_cmd.set_defaults(func=command_notebooks)
 
     presets_cmd = subparsers.add_parser("presets", help="list presets, page sizes and rulings")
     presets_cmd.set_defaults(func=command_presets)
