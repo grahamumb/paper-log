@@ -1,25 +1,43 @@
 """Page identity: the tokens that go inside the QR codes.
 
-A token is a short, self-describing, self-validating string that names exactly
-one *corner* of exactly one *page* of exactly one *notebook*::
+A token names exactly one *corner* of exactly one *page* of exactly one
+*notebook*. There are two spellings of the same four facts.
 
-    PL1:K7M2QX4A:42:F:TR:A19C
-    |   |        |  | |  |
-    |   |        |  | |  CRC-16/CCITT-FALSE of everything before it, hex
-    |   |        |  | corner: TL / TR / BL / BR
-    |   |        |  side: F (front/recto) or B (back/verso)
-    |   |        page number within the notebook, 1-based
-    |   notebook id, 8 Crockford base32 chars
+**Compact** (the default, and what gets printed)::
+
+    PJ4M7QX0084K1
+    |\----------/
+    |     60 bits: notebook (30) | page (13) | corner (2) | side (1) | crc (14)
+    marker
+
+13 characters, which is what matters: it fits QR version 1 at error correction
+level Q. That is a 21x21 symbol -- against 25x25 for the readable spelling --
+so every module is ~16% larger in the same printed footprint, *and* a quarter
+of the symbol can be destroyed and still decode. Both of those are the
+difference between a code that survives a phone photo and one that does not.
+
+**Readable**, for URL payloads and for debugging by eye::
+
+    PL1:K7M2QX:42:F:TR:A19C
+    |   |      |  | |  |
+    |   |      |  | |  CRC-16/CCITT-FALSE of everything before it, hex
+    |   |      |  | corner: TL / TR / BL / BR
+    |   |      |  side: F (front/recto) or B (back/verso)
+    |   |      page number within the notebook, 1-based
+    |   notebook id, Crockford base32
     format version
+
+:func:`decode` accepts either, and tells them apart on sight.
 
 Design notes, all of which matter once you point a camera at the paper:
 
 * Every character is in QR "alphanumeric" mode (digits, A-Z, and ``$%*+-./:``),
-  so the symbol stays small and low-density -- readable from a phone held over
-  a page, and forgiving of a mediocre flatbed scan.
+  so the symbol stays in the smallest version that will hold it. Byte mode
+  would cost a whole version for the same content.
 * The corner is *in* the token. A scanner that catches even one corner knows
   which corner it caught, and therefore the page's orientation -- upside-down
-  and 90-degree-rotated scans deskew without guessing.
+  and 90-degree-rotated photographs resolve without guessing. It is also what
+  lets four codes anchor a perspective correction (see :mod:`paperlog.capture`).
 * The CRC means a misread is detected rather than silently filed as some other
   page. QR has its own error correction, but the CRC also covers the case where
   a token is retyped, OCR'd, or truncated by a URL handler.
@@ -39,7 +57,24 @@ FORMAT_VERSION = "PL1"
 #: Crockford base32 -- no I, L, O, U, so it is unambiguous when handwritten.
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-NOTEBOOK_ID_LENGTH = 8
+#: 6 characters is 30 bits: a billion notebooks, and short enough to write on
+#: a cover. It is also what the compact token has room for.
+NOTEBOOK_ID_LENGTH = 6
+
+# -- compact token layout --------------------------------------------------
+COMPACT_MARKER = "P"
+NOTEBOOK_BITS = 30
+PAGE_BITS = 13
+CORNER_BITS = 2
+SIDE_BITS = 1
+CRC_BITS = 14
+BODY_BITS = NOTEBOOK_BITS + PAGE_BITS + CORNER_BITS + SIDE_BITS  # 46
+COMPACT_BITS = BODY_BITS + CRC_BITS  # 60, exactly 12 base32 characters
+COMPACT_CHARS = COMPACT_BITS // 5
+COMPACT_LENGTH = len(COMPACT_MARKER) + COMPACT_CHARS  # 13
+
+MAX_NOTEBOOK_VALUE = (1 << NOTEBOOK_BITS) - 1
+MAX_PAGE = (1 << PAGE_BITS) - 1
 
 SIDES = ("F", "B")
 CORNERS = ("TL", "TR", "BL", "BR")
@@ -52,6 +87,7 @@ CORNER_NAMES = {
 }
 
 _NOTEBOOK_RE = re.compile(f"^[{ALPHABET}]{{1,32}}$")
+_COMPACT_RE = re.compile(f"^{COMPACT_MARKER}([{ALPHABET}]{{{COMPACT_CHARS}}})$")
 _TOKEN_RE = re.compile(
     rf"^{FORMAT_VERSION}:([{ALPHABET}]{{1,32}}):(\d{{1,6}}):([FB]):(TL|TR|BL|BR):([0-9A-F]{{4}})$"
 )
@@ -75,12 +111,32 @@ def crc16(data: bytes) -> int:
     return crc
 
 
+def base32_encode(value: int, length: int) -> str:
+    """Crockford base32, fixed width, most significant character first."""
+    if value < 0:
+        raise ValueError("cannot encode a negative value")
+    out = []
+    for shift in range(length - 1, -1, -1):
+        out.append(ALPHABET[(value >> (5 * shift)) & 0x1F])
+    return "".join(out)
+
+
+def base32_decode(text: str) -> int:
+    value = 0
+    for char in text:
+        index = ALPHABET.find(char)
+        if index < 0:
+            raise TokenError(f"{char!r} is not a Crockford base32 character")
+        value = (value << 5) | index
+    return value
+
+
 def new_notebook_id(length: int = NOTEBOOK_ID_LENGTH) -> str:
     """Generate a random notebook id.
 
-    8 characters of Crockford base32 is 40 bits: enough that two notebooks
-    printed by the same person will not collide, short enough to write on a
-    cover.
+    6 characters of Crockford base32 is 30 bits -- a billion notebooks, which
+    is plenty for one person, and short enough to write on a cover. It is also
+    the width the compact token reserves.
     """
     if length < 1:
         raise ValueError("notebook id length must be at least 1")
@@ -126,9 +182,37 @@ class PageRef:
         return f"{FORMAT_VERSION}:{self.notebook}:{self.page}:{self.side}:{self.corner}"
 
     @property
-    def token(self) -> str:
-        """The full, checksummed token."""
+    def readable(self) -> str:
+        """The long, human-legible spelling, with its checksum."""
         return f"{self.body}:{crc16(self.body.encode('ascii')):04X}"
+
+    @property
+    def token(self) -> str:
+        """The compact spelling -- what actually gets printed.
+
+        13 characters, so the symbol stays at QR version 1 even at error
+        correction level Q.
+        """
+        notebook_value = base32_decode(self.notebook)
+        if notebook_value > MAX_NOTEBOOK_VALUE:
+            raise TokenError(
+                f"notebook id {self.notebook!r} needs more than {NOTEBOOK_BITS} bits, "
+                f"so it will not fit a compact token. Use at most "
+                f"{NOTEBOOK_BITS // 5} characters, or set token_format: readable."
+            )
+        if self.page > MAX_PAGE:
+            raise TokenError(
+                f"page {self.page} exceeds the {MAX_PAGE} a compact token can hold; "
+                "use token_format: readable for a notebook this long"
+            )
+        body = (
+            (notebook_value << (PAGE_BITS + CORNER_BITS + SIDE_BITS))
+            | (self.page << (CORNER_BITS + SIDE_BITS))
+            | (CORNERS.index(self.corner) << SIDE_BITS)
+            | SIDES.index(self.side)
+        )
+        checksum = crc16(body.to_bytes(6, "big")) & ((1 << CRC_BITS) - 1)
+        return COMPACT_MARKER + base32_encode((body << CRC_BITS) | checksum, COMPACT_CHARS)
 
     @property
     def corner_name(self) -> str:
@@ -149,20 +233,37 @@ def decode(token: str) -> PageRef:
     if not isinstance(token, str):
         raise TokenError(f"expected a string, got {type(token).__name__}")
 
-    candidate = token.strip().upper()
-    if FORMAT_VERSION + ":" in candidate and not candidate.startswith(FORMAT_VERSION + ":"):
-        # A URL payload: keep everything from the version marker onwards, then
-        # trim any trailing query string the scanner app may have appended.
-        candidate = candidate[candidate.index(FORMAT_VERSION + ":") :]
-        candidate = re.split(r"[?#&\s]", candidate, maxsplit=1)[0]
-    candidate = candidate.rstrip("/")
+    text = token.strip().upper()
 
-    match = _TOKEN_RE.match(candidate)
+    # A URL payload wraps the token in path segments, a fragment, or a query
+    # string, so try the whole string first and then each piece of it. Both
+    # spellings have to survive this: the compact one is bare characters with
+    # no marker to search for, so the only way to find it is to look at the
+    # segments.
+    candidates = [text.rstrip("/")]
+    if FORMAT_VERSION + ":" in text:
+        tail = text[text.index(FORMAT_VERSION + ":") :]
+        candidates.append(re.split(r"[?#&\s]", tail, maxsplit=1)[0].rstrip("/"))
+    candidates.extend(
+        piece for piece in re.split(r"[/?#&\s]+", text) if piece
+    )
+
+    for candidate in candidates:
+        compact = _COMPACT_RE.match(candidate)
+        if compact:
+            return _decode_compact(candidate, compact.group(1))
+
+    match = None
+    for candidate in candidates:
+        match = _TOKEN_RE.match(candidate)
+        if match:
+            break
     if not match:
         raise TokenError(
-            f"not a {FORMAT_VERSION} token: {token!r} "
-            f"(expected {FORMAT_VERSION}:<notebook>:<page>:<F|B>:<corner>:<crc>)"
+            f"not a paper-log token: {token!r} (expected a {COMPACT_LENGTH}-character "
+            f"compact token, or {FORMAT_VERSION}:<notebook>:<page>:<F|B>:<corner>:<crc>)"
         )
+    candidate = match.group(0)
     notebook, page, side, corner, checksum = match.groups()
     ref = PageRef(notebook=notebook, page=int(page), side=side, corner=corner)
     expected = f"{crc16(ref.body.encode('ascii')):04X}"
@@ -174,27 +275,61 @@ def decode(token: str) -> PageRef:
     return ref
 
 
-def render_payload(template: str, ref: PageRef) -> str:
+def _decode_compact(candidate: str, payload: str) -> PageRef:
+    value = base32_decode(payload)
+    checksum = value & ((1 << CRC_BITS) - 1)
+    body = value >> CRC_BITS
+    expected = crc16(body.to_bytes(6, "big")) & ((1 << CRC_BITS) - 1)
+    if checksum != expected:
+        raise TokenError(
+            f"checksum mismatch on {candidate!r}: expected {expected:04X}, "
+            f"read {checksum:04X}. The code was misread or the token was edited."
+        )
+
+    side = SIDES[body & ((1 << SIDE_BITS) - 1)]
+    corner = CORNERS[(body >> SIDE_BITS) & ((1 << CORNER_BITS) - 1)]
+    page = (body >> (SIDE_BITS + CORNER_BITS)) & ((1 << PAGE_BITS) - 1)
+    notebook_value = body >> (SIDE_BITS + CORNER_BITS + PAGE_BITS)
+    if page == 0:
+        raise TokenError(f"{candidate!r} decodes to page 0, which cannot exist")
+    return PageRef(
+        notebook=base32_encode(notebook_value, NOTEBOOK_ID_LENGTH),
+        page=page,
+        side=side,
+        corner=corner,
+    )
+
+
+def encode(ref: PageRef, token_format: str = "compact") -> str:
+    """The token for ``ref`` in the requested spelling."""
+    if token_format == "compact":
+        return ref.token
+    if token_format == "readable":
+        return ref.readable
+    raise TokenError(f"unknown token_format {token_format!r}; use compact or readable")
+
+
+def render_payload(template: str, ref: PageRef, token_format: str = "compact") -> str:
     """Build the string that actually goes into a QR symbol.
 
-    ``template`` may be ``"{token}"`` (the default, and the most compact) or
+    ``template`` may be ``"{token}"`` (the default, and the smallest symbol) or
     something like ``"https://notes.example/p/{token}"`` for scanners that
-    prefer to open a link. Available fields: ``token``, ``notebook``, ``page``,
-    ``side``, ``corner``, ``crc``.
+    prefer to open a link. Available fields: ``token``, ``readable``,
+    ``notebook``, ``page``, ``side``, ``corner``.
     """
     try:
         return template.format(
-            token=ref.token,
+            token=encode(ref, token_format),
+            readable=ref.readable,
             notebook=ref.notebook,
             page=ref.page,
             side=ref.side,
             corner=ref.corner,
-            crc=ref.token.rsplit(":", 1)[1],
         )
     except (KeyError, IndexError) as exc:
         raise TokenError(
             f"unknown placeholder {exc} in qr payload template {template!r}; "
-            "available: {token} {notebook} {page} {side} {corner} {crc}"
+            "available: {token} {readable} {notebook} {page} {side} {corner}"
         ) from None
 
 

@@ -9,13 +9,18 @@ stack of handwritten pages and software can file them without you naming a
 single file — in the right order, right way up, even if they went through the
 feeder shuffled and upside down.
 
+It works both ways: `paperlog build` makes the journal, `paperlog scan` reads
+your photographs of it back, undoing the perspective of a hand-held phone and
+filing each page under its own name.
+
+```bash
+paperlog build --preset a5-ruled --pages 64 --out journal.pdf   # print this
+paperlog scan photos/ --pdf notebook.pdf                        # then photograph it
+```
+
 Pages, paper size, ruling, margins and the codes themselves are all
 configurable, and the layout is checked before you print: paper-log tells you
 if a code would land on top of your writing or come out too small to scan.
-
-```
-paperlog build --preset a5-ruled --pages 64 --out journal.pdf
-```
 
 ## Install
 
@@ -46,71 +51,149 @@ codes — the map your scanning pipeline reads.
 
 ## The page identifier
 
-Each code holds one token:
+Each code holds one token. The default spelling is compact, because size is
+the thing that decides whether a phone can read it:
 
 ```
-PL1:K7M2QX4A:42:F:TR:A19C
- │      │     │  │ │   └── CRC-16/CCITT-FALSE of everything before it
- │      │     │  │ └────── corner: TL, TR, BL or BR
- │      │     │  └──────── side: F (front/recto) or B (back/verso)
- │      │     └─────────── page number, 1-based
- │      └───────────────── notebook id, 8 Crockford base32 characters
- └──────────────────────── format version
+PK7M2QX059BFZ
+ \----------/
+   60 bits: notebook (30) | page (13) | corner (2) | side (1) | crc (14)
 ```
+
+13 characters fits **QR version 1 at error correction level Q** — a 21x21
+symbol that tolerates losing a quarter of itself. The obvious readable
+spelling, `PL1:K7M2QX:42:F:TR:51AA`, needs 25x25 for the same content. Same
+printed square, 16% bigger modules, better error correction. You can still ask
+for it with `token_format: readable`, and `paperlog decode` reads either.
 
 Four decisions worth knowing about, since they are what makes the scanning end
 easy:
 
-**The corner is inside the token.** A scanner that reads even one code knows
-which corner it read, so it can work out the page's rotation without guessing.
-Codes in opposite corners give two anchor points; all four give a full set for
-perspective-correcting a photo.
+**The corner is inside the token.** A code knows which corner of the page it
+occupies. That gives orientation for free — a page photographed upside down
+just produces a transform that includes the rotation, with no "which way up"
+guess to get wrong — and it is what lets four codes pin down a perspective
+correction.
 
-**Every character is QR "alphanumeric".** Sticking to `0-9 A-Z` and `$%*+-./:`
-keeps the symbol a whole version smaller than byte mode would — 25×25 modules
-instead of 29×29 — which means bigger, more readable modules in the same space.
+**Every character is QR "alphanumeric".** Sticking to `0-9 A-Z` keeps the
+symbol in the smallest version that will hold it; byte mode would cost a whole
+version for the same content.
 
-**There is a checksum.** QR has its own error correction, but the CRC also
-covers tokens that get retyped, OCR'd, or truncated by a URL handler. A misread
-page is rejected rather than silently filed as a different one.
+**There is a checksum.** 14 bits of CRC, which catches *every* single-character
+corruption of a token (there is a test that tries all of them). A compact token
+is opaque, so this is the only thing standing between a misread and a page
+filed under the wrong number.
 
 **Notebook ids use Crockford base32** — no I, L, O or U — so an id stays
-unambiguous written on a cover and read back later. `paperlog decode` accepts
-the lenient spellings (`0`/`O`, `1`/`I`/`L`).
+unambiguous written on a cover. Six characters, a billion notebooks.
 
 Decode one by hand at any time:
 
 ```console
-$ paperlog decode PL1:K7M2QX4A:42:F:TR:DF6B
-notebook  K7M2QX4A
+$ paperlog decode PK7M2QX059BFZ
+notebook  K7M2QX
 page      42 (front)
 corner    top-right
-token     PL1:K7M2QX4A:42:F:TR:DF6B  ✓ checksum ok
+token     PK7M2QX059BFZ  ✓ checksum ok
 ```
 
-Reprinting a notebook is just reusing its id — `--notebook-id K7M2QX4A`
+Reprinting a notebook is just reusing its id — `--notebook-id K7M2QX`
 regenerates identical tokens.
 
+## Photographing pages
+
+This is the workflow the defaults are tuned for. Photograph pages with a phone,
+however they come — at an angle, rotated, upside down, in any order — and:
+
+```console
+$ paperlog scan photos/ -m journal.manifest.json --pdf notebook.pdf
+photos    5
+notebooks K7M2QX
+  K7M2QX-p0001F  4 code(s), fit 0.15mm -> pages/K7M2QX/K7M2QX-p0001F.png
+  K7M2QX-p0003F  4 code(s), fit 0.12mm -> pages/K7M2QX/K7M2QX-p0003F.png
+  K7M2QX-p0004B  4 code(s), fit 0.16mm -> pages/K7M2QX/K7M2QX-p0004B.png
+  K7M2QX-p0006B  4 code(s), fit 0.14mm -> pages/K7M2QX/K7M2QX-p0006B.png
+  skipped IMG_1002.jpg: a better shot of K7M2QX-p0003F exists
+missing   K7M2QX: no photo of page(s) 2, 5
+bound     notebook.pdf
+recovered 4 page(s), 0 photo(s) failed
+```
+
+What that does, in order:
+
+1. **Finds the codes.** Not by searching the whole frame — the symbols are a
+   few percent of a page photo and detectors downsample before they look.
+   Searching overlapping tiles at full resolution finds four codes where a
+   whole-frame search finds one, which is worth roughly a 1.5x cut in the
+   resolution you need.
+2. **Works out the page.** Each code names its notebook, page, side and corner.
+3. **Undoes the perspective.** Each symbol contributes four point
+   correspondences, so four codes give sixteen points spread to the corners of
+   the sheet — a well-conditioned homography. The page comes out square-on at
+   300dpi, at its true physical size, whichever way up you shot it.
+4. **Evens out the lighting.** A photo carries the lamp with it. Dividing by an
+   estimate of the paper level cancels that, so the page reads as white rather
+   than "bright in one corner". `--enhance scan` goes further, to near
+   black-and-white; `--enhance none` leaves it alone.
+5. **Files and reports.** Named `NOTEBOOK-p0003F.png` so it sorts into reading
+   order, deduplicated if you reshot a page (the better capture wins), with the
+   pages you never photographed listed so you know what to go back for.
+
+`--pdf` binds the recovered pages back into a notebook, in order, at the
+original page size.
+
+`fit` is the RMS reprojection error of the flattening, in millimetres on the
+page — the honest measure of how square the result is. Under about 0.6mm is a
+good fit; the tool warns past 1.5mm, which usually means a curled page or a
+misread code.
+
+### Will it work with my phone?
+
+Measured against simulated captures — perspective tilt, in-plane rotation, a
+background around the sheet, uneven lighting and vignetting, downscaling, focus
+blur, sensor noise and JPEG compression. This is a simulation, so it tests the
+geometry and the decoding rather than real optics; treat it as a floor, not a
+promise.
+
+Codes found, out of four, at the default 16mm:
+
+| Photo width across the page | 13mm codes | **16mm (default)** | 20mm codes |
+|---|---|---|---|
+| 1200 px | 0 | 0 | 1–3 |
+| 1600 px | 0 | 1–4 | 3–4 |
+| 2000 px | 0–3 | **4** | 4 |
+| 2400 px | 3–4 | **4** | 4 |
+| 3000 px | 4 | **4** | 4 |
+
+So: **fill the frame with the page**. A modern phone shooting 12MP gives you
+3000–4000 px across an A5 page held at a sensible distance, which is well clear.
+The failure mode to avoid is photographing the page small in a wide shot, or
+letting a corner fall outside the frame.
+
+You do not need all four codes. Three still gives a proper fit; two corrects
+rotation and scale but not tilt; one identifies the page and is flagged as low
+confidence. Any of them tells you *which page it is* — that never degrades.
+
+With four codes in frame the flattening lands at 0.13–0.17mm RMS across the
+whole page.
+
+## Scanning: sizes and resolution
 ## Scanning: sizes and resolution
 
-Reliability comes down to one number: **the printed size of a single QR
-module**. The defaults give 0.45mm, and `paperlog build` warns if your settings
-drop below 0.4mm.
+If you use a flatbed rather than a phone, everything gets easier. Reliability
+comes down to one number: **the printed size of a single QR module**. The
+defaults give 0.64mm, and `paperlog build` warns below 0.4mm.
 
-Measured against this repo's own output, decoded with OpenCV:
+At the default 16mm the codes read back from a **150dpi** scan and fail at
+100dpi, where a module drops under three pixels. 300dpi is the sensible
+default and leaves plenty of headroom. Under about 0.33mm per module nothing
+survives real paper regardless of resolution — ink spreads and optics blur.
 
-| Code size | Module | 200dpi | 250dpi | 300dpi |
-|-----------|--------|--------|--------|--------|
-| 13mm (default) | 0.45mm | no | marginal | yes |
-| 17mm | 0.59mm | yes | yes | yes |
-
-So: **scan at 300dpi**, or raise `qr.size` to ~17mm if you are stuck at 200.
-Anything under about 0.33mm per module will not survive real paper regardless
-of resolution — ink spreads and the scanner's optics blur.
-
-Longer payloads mean denser symbols. `payload: "{token}"` is the most compact;
-a URL template like `https://notes.example/p/{token}` is friendlier to a phone
-camera but pushes the symbol to the next QR version, so give it more room.
+Longer payloads mean denser symbols, and density is exactly what you are
+trying to avoid. `payload: "{token}"` is the smallest; a URL template like
+`https://notes.example/p/{token}` is friendlier to a generic camera app but
+pushes the symbol several versions up, so give it a bigger `qr.size` (see
+`examples/url-payload.yaml`).
 
 Every code in a run is printed at the same module pitch — sized for the highest
 page number — so a scanner tuned on page 1 still works on page 200.
@@ -172,8 +255,8 @@ landscape: false
 imposition: none      # or "booklet"
 
 margins:
-  top: 18mm
-  bottom: 20mm
+  top: 22mm           # top/bottom clear the codes, whatever the sides do
+  bottom: 22mm
   inner: 20mm         # binding edge; swaps sides each page when duplex
   outer: 12mm         # (also accepts left/right, or "all")
 
@@ -190,11 +273,12 @@ ruling:
 
 qr:
   enabled: true
-  corners: [TL, BR]   # any of TL TR BL BR, or "all"
-  size: 13mm          # footprint including the quiet zone
+  corners: all        # all four; a photo needs four points to undo perspective
+  size: 16mm          # footprint including the quiet zone
   inset: 5mm          # from the paper edge
   quiet_zone: 2       # in modules (see below)
-  error_correction: m # l m q h
+  error_correction: q # l m q h
+  token_format: compact   # 13 chars, 21x21 modules; or "readable"
   payload: "{token}"  # or "https://notes.example/p/{token}"
   caption: false      # print the page id in small type beside each code,
                       # auto-shrunk to fit and shortened to the page
@@ -241,7 +325,7 @@ to it — whichever costs less writing room. paper-log checks each corner
 individually, on fronts and backs, and says which knob to turn:
 
 ```
-warning:  The TR code overlaps the writing area on front pages. Give it 18mm of
+warning:  The TR code overlaps the writing area on front pages. Give it 21mm of
           clearance: raise the top margin from 12mm, widen the side margin
           beside it, or shrink qr.size / qr.inset.
 ```
@@ -317,8 +401,11 @@ for page in result.pages:
 }
 ```
 
-Geometry is in millimetres from the bottom-left of the page, which is what a
-deskewed scan gives you. `token_format` is spelled out in full so the scanning
+Geometry is in millimetres from the bottom-left of the page, and ``size_mm`` is
+the printed footprint *including* the quiet zone — a detector reports the
+bounds of the dark symbol, so subtract ``quiet_zone_modules`` worth before
+matching photo points to page coordinates. Getting that wrong costs a
+systematic 1.3mm and still looks plausible. `token_format` is spelled out in full so the scanning
 side can be written against the manifest alone — and `paperlog/ids.py`
 implements the whole scheme, CRC included, in one dependency-free file if you
 would rather port it.
@@ -329,8 +416,13 @@ would rather port it.
 python -m pytest
 ```
 
-The suite includes an end-to-end check that renders journals, rasterises them
-and decodes the codes back — including negative cases, so the check can fail:
-undersized codes, mismatched manifests, and scans at too low a resolution are
-all expected to be rejected. Those tests skip if the `[verify]` extras are not
-installed.
+The suite renders journals, rasterises them, and decodes the codes back. The
+capture tests go further and put every page through a **simulated phone
+camera** — perspective, rotation, uneven light, downscaling, blur, noise, JPEG
+— then check the page is identified and flattened to within a fraction of a
+millimetre, including upside down and 90 degrees off.
+
+Negative cases matter as much: undersized codes, mismatched manifests, blank
+frames, unknown notebooks and too-low resolutions are all expected to be
+rejected, so the checks can actually fail. Tests needing the `[verify]` extras
+skip without them.

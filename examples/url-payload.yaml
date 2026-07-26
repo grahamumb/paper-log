@@ -4,21 +4,21 @@
 #
 # Pointing a phone camera at a page opens the URL, which is handy if you run
 # something at the other end that shows the scanned page. The cost is density:
-# the URL prefix pushes the symbol from 25x25 modules to 33x33, so the code is
-# enlarged to 16mm to keep each module at 0.43mm. The margins grow to
-# match -- 16mm of code plus a 5mm inset needs 21mm of clearance in one axis
-# at each corner that carries one.
+# the URL prefix pushes the symbol well past the compact token's 21x21, so the
+# code is enlarged to 20mm to keep the modules big enough to photograph. The
+# margins grow to match -- 20mm of code plus a 5mm inset needs 25mm of
+# clearance in one axis at each corner that carries one.
 #
 # `paperlog decode` still reads these: it pulls the token out of the URL.
 
-notebook_id: K7M2QX4A
+notebook_id: K7M2QX
 title: "Linked notes"
 pages: 48
 page_size: a5
 
 margins:
-  top: 22mm
-  bottom: 22mm
+  top: 26mm
+  bottom: 26mm
   inner: 22mm
   outer: 14mm
 
@@ -30,7 +30,7 @@ ruling:
 
 qr:
   corners: [TL, BR]
-  size: 16mm
+  size: 20mm
   inset: 5mm
   payload: "https://notes.example/p/{token}"
   error_correction: m

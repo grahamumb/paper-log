@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__, build
 from .config import (
@@ -21,6 +21,8 @@ from .config import (
 from .ids import CORNER_NAMES, TokenError, decode, new_notebook_id
 from .imposition import padded_count
 from .units import MM, UnitError
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".webp", ".bmp"}
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     "a5-ruled": {
@@ -71,10 +73,10 @@ page_size: a5         # a4 a5 a6 b5 letter half-letter pocket travelers, or 148x
 imposition: none      # or "booklet" to print folded sheets two-up
 
 margins:
-  top: 18mm
-  bottom: 20mm
+  top: 22mm
+  bottom: 22mm        # top/bottom clear the codes, whatever the sides do
   inner: 20mm         # binding edge
-  outer: 12mm         # these defaults keep all four corners clear of the codes
+  outer: 12mm
 
 ruling:
   style: ruled        # blank ruled dotted grid cornell
@@ -85,12 +87,13 @@ ruling:
 
 qr:
   enabled: true
-  corners: [TL, BR]   # any of TL TR BL BR, or "all"
-  size: 13mm          # footprint including the quiet zone
+  corners: all        # all four: what a phone photo needs to undo perspective
+  size: 16mm          # footprint including the quiet zone
   inset: 5mm          # from the paper edge
-  error_correction: m
+  error_correction: q # 25% of the symbol can be lost and still decode
+  token_format: compact   # 13 chars, 21x21 modules; or "readable"
   payload: "{{token}}"  # or e.g. "https://notes.example/p/{{token}}"
-  caption: false      # print the page id in small type under each code
+  caption: false      # print the page id in small type beside each code
 
 fiducials:
   style: bracket      # bracket square cross none
@@ -144,6 +147,8 @@ def _add_build_arguments(parser: argparse.ArgumentParser) -> None:
     codes.add_argument("--qr-size")
     codes.add_argument("--qr-inset")
     codes.add_argument("--qr-ecc", choices=("l", "m", "q", "h"))
+    codes.add_argument("--qr-token-format", choices=("compact", "readable"),
+                       help="compact is 21x21 modules; readable is the legible PL1:... form")
     codes.add_argument("--qr-payload", help="payload template, default '{token}'")
     codes.add_argument("--qr-caption", action="store_true", default=None, help="print the page id under each code")
     codes.add_argument("--fiducials", dest="fiducial_style", choices=("bracket", "square", "cross", "none"))
@@ -189,6 +194,7 @@ def overrides_from_args(args: argparse.Namespace) -> Dict[str, Any]:
     _nest(overrides, "qr.inset", args.qr_inset)
     _nest(overrides, "qr.error_correction", args.qr_ecc)
     _nest(overrides, "qr.payload", args.qr_payload)
+    _nest(overrides, "qr.token_format", args.qr_token_format)
     _nest(overrides, "qr.caption", args.qr_caption)
     _nest(overrides, "fiducials.style", args.fiducial_style)
     return overrides
@@ -323,6 +329,88 @@ def command_verify(args: argparse.Namespace) -> int:
     return 1
 
 
+def command_scan(args: argparse.Namespace) -> int:
+    from .capture import (
+        BackendMissing,
+        CaptureError,
+        assemble_pdf,
+        load_manifests,
+        process,
+    )
+
+    photos: List[Path] = []
+    for entry in args.photos:
+        photos.extend(sorted(p for p in entry.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+                      if entry.is_dir() else [entry])
+    if not photos:
+        print("error: no images to scan", file=sys.stderr)
+        return 1
+
+    sources = args.manifest or _default_manifest_paths(photos)
+    try:
+        manifests = load_manifests(sources)
+    except (CaptureError, BackendMissing) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not manifests:
+        print(
+            "error: no manifests found. Pass --manifest with the .manifest.json "
+            "written next to the journal PDF.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"photos    {len(photos)}")
+    print(f"notebooks {', '.join(sorted(manifests))}")
+    try:
+        run = process(
+            photos, manifests, args.out_dir, dpi=args.dpi, enhancement=args.enhance
+        )
+    except BackendMissing as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    for record in run.records:
+        page = record.page
+        flag = "" if page.confident else "  (low confidence)"
+        where = f" -> {record.path}" if record.path else ""
+        print(
+            f"  {page.name}  {len(page.codes)} code(s), fit {page.residual_mm:.2f}mm"
+            f"{flag}{where}"
+        )
+        for note in page.warnings:
+            print(f"      {note}", file=sys.stderr)
+    for record in run.superseded:
+        print(f"  skipped {record.source.name}: a better shot of {record.page.name} exists")
+    for path, reason in run.failures:
+        print(f"  failed  {path.name}: {reason}", file=sys.stderr)
+
+    for notebook, gaps in run.missing_pages(manifests).items():
+        listed = ", ".join(str(page) for page in gaps[:20])
+        more = " ..." if len(gaps) > 20 else ""
+        print(f"missing   {notebook}: no photo of page(s) {listed}{more}")
+
+    if args.pdf:
+        for notebook, records in run.by_notebook().items():
+            target = args.pdf if len(run.by_notebook()) == 1 else args.pdf.with_name(
+                f"{args.pdf.stem}-{notebook}{args.pdf.suffix}"
+            )
+            assemble_pdf(records, target, manifests[notebook.upper()])
+            print(f"bound     {target}")
+
+    print(f"recovered {len(run.records)} page(s), {len(run.failures)} photo(s) failed")
+    return 1 if run.failures and not run.records else 0
+
+
+def _default_manifest_paths(photos: Sequence[Path]) -> List[Path]:
+    """Look for manifests beside the photos and in the working directory."""
+    seen: List[Path] = []
+    for folder in [Path.cwd()] + [photo.parent for photo in photos]:
+        if folder not in seen:
+            seen.append(folder)
+    return seen
+
+
 def command_presets(args: argparse.Namespace) -> int:
     print("presets:")
     for name, preset in sorted(PRESETS.items()):
@@ -383,6 +471,20 @@ def build_parser() -> argparse.ArgumentParser:
     verify_cmd.add_argument("--dpi", type=int, default=300, help="rasterisation dpi (default: 300)")
     verify_cmd.add_argument("--pages", type=int, help="only scan the first N pages")
     verify_cmd.set_defaults(func=command_verify)
+
+    scan_cmd = subparsers.add_parser(
+        "scan", help="flatten and identify photographs of written pages"
+    )
+    scan_cmd.add_argument("photos", nargs="+", type=Path, help="image files or directories")
+    scan_cmd.add_argument("-m", "--manifest", type=Path, action="append",
+                          help="manifest file or directory (repeatable)")
+    scan_cmd.add_argument("-o", "--out-dir", type=Path, default=Path("pages"),
+                          help="where to write flattened pages (default: pages/)")
+    scan_cmd.add_argument("--dpi", type=int, default=300, help="output resolution (default: 300)")
+    scan_cmd.add_argument("--enhance", choices=("flatten", "scan", "none"), default="flatten",
+                          help="even out the lighting (default: flatten)")
+    scan_cmd.add_argument("--pdf", type=Path, help="also bind the pages into a PDF, in order")
+    scan_cmd.set_defaults(func=command_scan)
 
     presets_cmd = subparsers.add_parser("presets", help="list presets, page sizes and rulings")
     presets_cmd.set_defaults(func=command_presets)

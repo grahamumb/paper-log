@@ -7,11 +7,13 @@
 # through the spine.
 #
 # The margins are tighter than the defaults, so the codes are shrunk to 12mm
-# and pulled closer to the paper edge to stay clear of the dot grid. That
-# still leaves 0.41mm per module -- above the 0.4mm threshold, but scan these
-# at 300dpi rather than 200.
+# and pulled closer to the paper edge to stay clear of the dot grid. The
+# compact token keeps the symbol at 21x21 modules, so even at 12mm each module
+# is 0.48mm -- comfortably above the 0.4mm threshold. Only two corners carry a
+# code here, which is enough to identify and rotate a page but not to undo
+# camera tilt; photograph these square-on, or set `corners: all`.
 
-notebook_id: K7M2QX4A
+notebook_id: K7M2QX
 title: "Pocket log"
 pages: 32
 duplex: true

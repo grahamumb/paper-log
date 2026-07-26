@@ -15,7 +15,14 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .ids import CORNERS, new_notebook_id, normalise_notebook_id
+from .ids import (
+    CORNERS,
+    MAX_PAGE,
+    PageRef,
+    TokenError,
+    new_notebook_id,
+    normalise_notebook_id,
+)
 from .units import MM, to_points
 
 Color = Tuple[float, float, float]
@@ -48,6 +55,7 @@ PAGE_SIZES: Dict[str, Tuple[float, float]] = {
 RULING_STYLES = ("blank", "ruled", "dotted", "grid", "cornell")
 FIDUCIAL_STYLES = ("bracket", "square", "cross", "none")
 ECC_LEVELS = ("l", "m", "q", "h")
+TOKEN_FORMATS = ("compact", "readable")
 IMPOSITIONS = ("none", "booklet")
 
 
@@ -109,10 +117,11 @@ class Margins:
     journal they swap sides every page so the gutter always lands at the spine.
     """
 
-    #: The defaults leave every corner clear of the text block for a QR code
-    #: at the default size and inset -- see ``JournalConfig.warnings``.
-    top: float = 18 * MM
-    bottom: float = 20 * MM
+    #: Top and bottom clear the default 16mm code plus its 5mm inset, which is
+    #: what keeps all four corners off the writing area whatever the side
+    #: margins do -- see ``JournalConfig.warnings``.
+    top: float = 22 * MM
+    bottom: float = 22 * MM
     inner: float = 20 * MM
     outer: float = 12 * MM
 
@@ -184,12 +193,16 @@ class QrSpec:
     """The corner codes -- the part that makes the pages machine-filable."""
 
     enabled: bool = True
-    #: Which corners carry a code. Four gives a scanner an anchor at every
-    #: corner (best deskew, most ink); two diagonal corners is a good default;
-    #: one is enough to identify a page that was scanned squarely.
-    corners: List[str] = field(default_factory=lambda: ["TL", "BR"])
-    #: Overall footprint of the symbol *including* its quiet zone.
-    size: float = 13 * MM
+    #: Which corners carry a code. Four is the default because it is what a
+    #: photograph needs: four known points is exactly enough to solve the
+    #: perspective distortion of a hand-held camera. Two diagonal corners still
+    #: identify the page and can correct rotation and scale, but not tilt.
+    corners: List[str] = field(default_factory=lambda: ["TL", "TR", "BL", "BR"])
+    #: Overall footprint of the symbol *including* its quiet zone. 16mm is
+    #: sized for a phone photograph: measured against simulated captures, it
+    #: decodes reliably from about 2000 pixels across the page, where 13mm
+    #: needs 2400-3000. A flatbed scan is happy with far less.
+    size: float = 16 * MM
     #: Distance from the paper edge to that footprint.
     inset: float = 5 * MM
     #: Quiet zone in modules. The spec asks for 4, but that assumes something
@@ -197,7 +210,12 @@ class QrSpec:
     #: in a margin several millimetres wide, so the paper supplies the real
     #: quiet zone and a nominal 2 buys a usefully bigger module instead.
     quiet_zone: int = 2
-    error_correction: str = "m"
+    #: Q recovers 25% of a damaged symbol. With a 13-character token the symbol
+    #: is QR version 1 either way, so the robustness is free.
+    error_correction: str = "q"
+    #: "compact" (13 characters, 21x21 modules) or "readable" (the PL1:... form,
+    #: 25x25). Compact unless you specifically want legible payloads.
+    token_format: str = "compact"
     color: Color = (0.0, 0.0, 0.0)
     #: ``{token}`` keeps the symbol smallest. A URL template makes a generic
     #: phone camera open something useful.
@@ -232,6 +250,10 @@ class QrSpec:
             kwargs["color"] = parse_color(data["color"])
         if "payload" in data:
             kwargs["payload"] = str(data["payload"])
+        if "token_format" in data:
+            kwargs["token_format"] = _one_of(
+                data["token_format"], TOKEN_FORMATS, "qr.token_format"
+            )
         if "caption" in data:
             kwargs["caption"] = bool(data["caption"])
         if "caption_size" in data:
@@ -513,6 +535,19 @@ class JournalConfig:
                 raise ConfigError(
                     "qr.size + qr.inset does not fit in the corner of this page"
                 )
+        if self.qr.enabled and self.qr.corners and self.qr.token_format == "compact":
+            # Fail here rather than part-way through rendering: the limits are
+            # a property of the configuration, not of any one page.
+            try:
+                PageRef(self.notebook_id, min(self.pages, MAX_PAGE), "F", "TL").token
+                if self.pages > MAX_PAGE:
+                    raise TokenError(
+                        f"{self.pages} pages exceeds the {MAX_PAGE} a compact token "
+                        "can hold; use qr.token_format: readable"
+                    )
+            except TokenError as exc:
+                raise ConfigError(str(exc)) from None
+
         if self.imposition == "booklet" and self.landscape:
             raise ConfigError(
                 "booklet imposition expects portrait pages; two of them are "

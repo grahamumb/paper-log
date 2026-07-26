@@ -1,6 +1,7 @@
 import pytest
 
 from paperlog import JournalConfig, build
+from paperlog.ids import PageRef, decode
 from paperlog.imposition import padded_count
 from paperlog.qrcodes import _runs, build_matrix, module_size, symbol_modules, worst_case_payload
 from paperlog.render import (
@@ -25,7 +26,7 @@ def page_sizes(path):
 @pytest.fixture
 def config():
     return JournalConfig.from_dict(
-        {"page_size": "a5", "pages": 8, "notebook_id": "K7M2QX4A"}
+        {"page_size": "a5", "pages": 8, "notebook_id": "K7M2QX"}
     )
 
 
@@ -33,7 +34,7 @@ def test_build_pages_numbers_and_sides(config):
     pages = build_pages(config)
     assert [page.number for page in pages] == list(range(1, 9))
     assert [page.side for page in pages] == ["F", "B"] * 4
-    assert pages[0].ref.notebook == "K7M2QX4A"
+    assert pages[0].ref.notebook == "K7M2QX"
 
 
 def test_pdf_has_one_sheet_per_page(config, tmp_path):
@@ -65,18 +66,20 @@ def test_manifest_lists_every_page_with_unique_tokens(config, tmp_path):
     assert len(manifest["pages"]) == 8
     tokens = [entry["token"] for entry in manifest["pages"]]
     assert len(set(tokens)) == 8
-    assert manifest["notebook"]["id"] == "K7M2QX4A"
+    assert manifest["notebook"]["id"] == "K7M2QX"
     assert manifest["page"]["width_mm"] == pytest.approx(148, abs=0.01)
 
 
 def test_manifest_records_a_payload_per_corner(config, tmp_path):
     result = build(config, tmp_path / "j.pdf")
     entry = result.manifest["pages"][0]
-    assert set(entry["codes"]) == {"TL", "BR"}
+    assert set(entry["codes"]) == {"TL", "TR", "BL", "BR"}
     # Each corner carries a distinct payload, which is what lets a scanner work
-    # out the page orientation from any single code it manages to read.
-    assert len(set(entry["codes"].values())) == 2
-    assert all(":TL:" in payload for payload in [entry["codes"]["TL"]])
+    # out the page orientation from any single code it manages to read, and
+    # what gives a photograph four anchor points instead of one.
+    assert len(set(entry["codes"].values())) == 4
+    for corner, payload in entry["codes"].items():
+        assert decode(payload).corner == corner
 
 
 def test_manifest_geometry_matches_the_renderer(config, tmp_path):
@@ -133,11 +136,13 @@ def test_header_height_is_zero_when_nothing_is_printed():
 
 def test_url_payloads_are_carried_through(tmp_path):
     config = JournalConfig.from_dict(
-        {"pages": 2, "notebook_id": "K7M2QX4A", "qr": {"payload": "https://n.test/p/{token}"}}
+        {"pages": 2, "notebook_id": "K7M2QX", "qr": {"payload": "https://n.test/p/{token}"}}
     )
     result = build(config, tmp_path / "j.pdf")
     payload = result.manifest["pages"][0]["codes"]["TL"]
-    assert payload.startswith("https://n.test/p/PL1:K7M2QX4A:1:F:TL:")
+    assert payload.startswith("https://n.test/p/")
+    # A URL wrapper must not stop the token being readable back out again.
+    assert decode(payload) == PageRef("K7M2QX", 1, "F", "TL")
 
 
 def test_warnings_are_reported_on_the_result(tmp_path):
@@ -170,7 +175,9 @@ def test_top_captions_stop_short_of_the_text_block():
 
 
 def test_generous_margins_leave_top_captions_unclamped():
-    roomy = JournalConfig.from_dict({"page_size": "a5", "qr": {"corners": "all"}})
+    roomy = JournalConfig.from_dict(
+        {"page_size": "a4", "margins": {"all": "30mm"}, "qr": {"corners": "all"}}
+    )
     boxes = roomy.qr_boxes()
     assert _caption_width_limit(roomy, "TL", boxes["TL"][0], roomy.qr.size, "F") == roomy.qr.size
 
@@ -194,13 +201,13 @@ def test_runs_collapse_adjacent_modules():
 
 
 def test_matrix_is_square_and_deterministic():
-    matrix = build_matrix("PL1:K7M2QX4A:1:F:TL:0000", "m")
+    matrix = build_matrix("PL1:K7M2QX:1:F:TL:0000", "m")
     assert len(matrix) == len(matrix[0])
-    assert build_matrix("PL1:K7M2QX4A:1:F:TL:0000", "m") == matrix
+    assert build_matrix("PL1:K7M2QX:1:F:TL:0000", "m") == matrix
 
 
 def test_symbol_modules_includes_the_quiet_zone():
-    payload = "PL1:K7M2QX4A:1:F:TL:0000"
+    payload = "PL1:K7M2QX:1:F:TL:0000"
     bare = len(build_matrix(payload, "m"))
     assert symbol_modules(payload, "m", quiet_zone=2) == bare + 4
     assert symbol_modules(payload, "m", quiet_zone=0) == bare
@@ -213,15 +220,20 @@ def test_module_size_shrinks_as_error_correction_rises():
 
 
 def test_worst_case_payload_uses_the_last_page():
-    config = JournalConfig.from_dict({"pages": 128, "notebook_id": "K7M2QX4A"})
-    assert ":128:" in worst_case_payload(config)
+    config = JournalConfig.from_dict({"pages": 128, "notebook_id": "K7M2QX"})
+    assert decode(worst_case_payload(config)).page == 128
+    readable = JournalConfig.from_dict(
+        {"pages": 128, "notebook_id": "K7M2QX", "qr": {"token_format": "readable"}}
+    )
+    assert ":128:" in worst_case_payload(readable)
 
 
 def test_all_pages_share_one_module_pitch(tmp_path):
     """Page 9 and page 100 must print the same size symbol, or a scanner tuned
     to one page stops working halfway through the notebook."""
-    config = JournalConfig.from_dict({"pages": 120, "notebook_id": "K7M2QX4A"})
-    fixed = symbol_modules(worst_case_payload(config), "m", config.qr.quiet_zone)
+    config = JournalConfig.from_dict({"pages": 120, "notebook_id": "K7M2QX"})
+    ecc = config.qr.error_correction
+    fixed = symbol_modules(worst_case_payload(config), ecc, config.qr.quiet_zone)
     for page in (1, 9, 10, 99, 100, 120):
-        payload = f"PL1:K7M2QX4A:{page}:F:TL:0000"
-        assert symbol_modules(payload, "m", config.qr.quiet_zone) <= fixed
+        payload = PageRef("K7M2QX", page, "F", "TL").token
+        assert symbol_modules(payload, ecc, config.qr.quiet_zone) <= fixed

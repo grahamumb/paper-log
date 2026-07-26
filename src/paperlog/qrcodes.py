@@ -49,7 +49,7 @@ def worst_case_payload(config) -> str:
         side="F",
         corner=(config.qr.corners[0] if config.qr.corners else "TL"),
     )
-    return render_payload(config.qr.payload, ref)
+    return render_payload(config.qr.payload, ref, config.qr.token_format)
 
 
 def module_size(config) -> float:

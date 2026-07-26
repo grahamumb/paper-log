@@ -1,7 +1,7 @@
 # paper-log journal definition. Lengths accept mm (default), cm, in, or pt.
 # Generate a fresh id with `paperlog new-id`; keep it stable to reprint the
 # same notebook, change it whenever you start a new one.
-notebook_id: DY45TV1Y
+notebook_id: KZYXDX
 title: ""
 pages: 64
 duplex: true          # odd pages are fronts, even pages backs; margins mirror
@@ -9,10 +9,10 @@ page_size: a5         # a4 a5 a6 b5 letter half-letter pocket travelers, or 148x
 imposition: none      # or "booklet" to print folded sheets two-up
 
 margins:
-  top: 18mm
-  bottom: 20mm
+  top: 22mm
+  bottom: 22mm        # top/bottom clear the codes, whatever the sides do
   inner: 20mm         # binding edge
-  outer: 12mm         # these defaults keep all four corners clear of the codes
+  outer: 12mm
 
 ruling:
   style: ruled        # blank ruled dotted grid cornell
@@ -23,12 +23,13 @@ ruling:
 
 qr:
   enabled: true
-  corners: [TL, BR]   # any of TL TR BL BR, or "all"
-  size: 13mm          # footprint including the quiet zone
+  corners: all        # all four: what a phone photo needs to undo perspective
+  size: 16mm          # footprint including the quiet zone
   inset: 5mm          # from the paper edge
-  error_correction: m
+  error_correction: q # 25% of the symbol can be lost and still decode
+  token_format: compact   # 13 chars, 21x21 modules; or "readable"
   payload: "{token}"  # or e.g. "https://notes.example/p/{token}"
-  caption: false      # print the page id in small type under each code
+  caption: false      # print the page id in small type beside each code
 
 fiducials:
   style: bracket      # bracket square cross none

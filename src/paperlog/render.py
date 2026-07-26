@@ -60,7 +60,7 @@ def draw_corner_codes(canvas, config: JournalConfig, page: Page) -> None:
 
     for corner in spec.corners:
         x, y = origins[corner]
-        payload = render_payload(spec.payload, page.ref.for_corner(corner))
+        payload = render_payload(spec.payload, page.ref.for_corner(corner), spec.token_format)
         draw_qr(
             canvas,
             x,

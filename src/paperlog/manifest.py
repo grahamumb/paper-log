@@ -78,10 +78,11 @@ def build(config, pages: Sequence[Page]) -> Dict[str, Any]:
             "page": page.number,
             "side": page.side,
             "token": page.token,
+            "readable": page.ref.readable,
         }
         if qr_section["enabled"]:
             entry["codes"] = {
-                corner: render_payload(config.qr.payload, page.ref.for_corner(corner))
+                corner: render_payload(config.qr.payload, page.ref.for_corner(corner), config.qr.token_format)
                 for corner in config.qr.corners
             }
         page_entries.append(entry)

@@ -63,7 +63,7 @@ def test_no_qr_flag(tmp_path, capsys):
 
 def test_notebook_id_is_reusable_for_reprints(tmp_path, capsys):
     for name in ("first", "second"):
-        run(capsys, "build", "--pages", "2", "--notebook-id", "K7M2QX4A", "--out", str(tmp_path / f"{name}.pdf"))
+        run(capsys, "build", "--pages", "2", "--notebook-id", "K7M2QX", "--out", str(tmp_path / f"{name}.pdf"))
     first = json.loads((tmp_path / "first.manifest.json").read_text())
     second = json.loads((tmp_path / "second.manifest.json").read_text())
     assert [p["token"] for p in first["pages"]] == [p["token"] for p in second["pages"]]
@@ -92,20 +92,20 @@ def test_warnings_go_to_stderr_but_still_build(tmp_path, capsys):
 
 
 def test_decode_command(capsys):
-    code, stdout, _ = run(capsys, "decode", "PL1:K7M2QX4A:42:F:TR:DF6B")
+    code, stdout, _ = run(capsys, "decode", "PK7M2QX059BFZ")
     assert code == 0
     assert "top-right" in stdout
     assert "42 (front)" in stdout
 
 
 def test_decode_command_rejects_a_bad_token(capsys):
-    code, _, stderr = run(capsys, "decode", "PL1:K7M2QX4A:42:F:TR:0000")
+    code, _, stderr = run(capsys, "decode", "PK7M2QX059BFY")
     assert code == 1
     assert "checksum" in stderr
 
 
 def test_decode_json_output(capsys):
-    code, stdout, _ = run(capsys, "decode", "PL1:K7M2QX4A:42:F:TR:DF6B", "--json")
+    code, stdout, _ = run(capsys, "decode", "PK7M2QX059BFZ", "--json")
     assert code == 0
     assert json.loads(stdout)["page"] == 42
 
@@ -139,4 +139,4 @@ def test_new_id_generates_distinct_ids(capsys):
     ids = stdout.split()
     assert code == 0
     assert len(set(ids)) == 5
-    assert all(len(value) == 8 for value in ids)
+    assert all(len(value) == 6 for value in ids)

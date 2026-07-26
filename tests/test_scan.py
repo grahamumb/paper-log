@@ -16,7 +16,7 @@ from paperlog.scancheck import expected_layout, verify  # noqa: E402
 
 
 def journal(tmp_path, name="j.pdf", **overrides):
-    settings = {"pages": 4, "notebook_id": "K7M2QX4A"}
+    settings = {"pages": 4, "notebook_id": "K7M2QX"}
     settings.update(overrides)
     config = JournalConfig.from_dict(settings)
     return config, build(config, tmp_path / name)
@@ -26,7 +26,7 @@ def test_every_printed_code_reads_back(tmp_path):
     _, result = journal(tmp_path)
     report = verify(result.pdf_path, result.manifest)
     assert report.ok, f"missing={report.missing} unexpected={report.unexpected}"
-    assert report.decoded == report.expected == 8  # 4 pages x 2 corners
+    assert report.decoded == report.expected == 16  # 4 pages x 4 corners
 
 
 def test_decoded_tokens_name_the_right_page_side_and_corner(tmp_path):
@@ -36,16 +36,16 @@ def test_decoded_tokens_name_the_right_page_side_and_corner(tmp_path):
         expected_page = scan.index + 1
         assert {ref.page for ref in scan.refs} == {expected_page}
         assert {ref.side for ref in scan.refs} == {"F" if expected_page % 2 else "B"}
-        assert {ref.corner for ref in scan.refs} == {"TL", "BR"}
-        assert {ref.notebook for ref in scan.refs} == {"K7M2QX4A"}
+        assert {ref.corner for ref in scan.refs} == {"TL", "TR", "BL", "BR"}
+        assert {ref.notebook for ref in scan.refs} == {"K7M2QX"}
 
 
-def test_codes_in_all_four_corners_read_back(tmp_path):
-    _, result = journal(tmp_path, qr={"corners": "all"})
+def test_two_corners_still_work_for_people_who_want_less_ink(tmp_path):
+    _, result = journal(tmp_path, qr={"corners": "TL,BR"})
     report = verify(result.pdf_path, result.manifest)
     assert report.ok
-    assert report.decoded == 16
-    assert {ref.corner for scan in report.scans for ref in scan.refs} == {"TL", "TR", "BL", "BR"}
+    assert report.decoded == 8
+    assert {ref.corner for scan in report.scans for ref in scan.refs} == {"TL", "BR"}
 
 
 def test_booklet_sheets_read_back(tmp_path):
@@ -53,7 +53,7 @@ def test_booklet_sheets_read_back(tmp_path):
     report = verify(result.pdf_path, result.manifest)
     assert report.ok, f"missing={report.missing}"
     assert report.pages_scanned == 4  # 8 pages -> 2 folded sheets -> 4 sides
-    assert report.decoded == 16
+    assert report.decoded == 32  # 8 pages x 4 corners
 
 
 def test_url_payloads_read_back(tmp_path):
@@ -77,17 +77,24 @@ def test_undersized_codes_are_reported_as_unreadable(tmp_path):
 
 
 def test_mismatched_manifest_is_detected(tmp_path):
-    _, printed = journal(tmp_path, "printed.pdf", notebook_id="AAAAAAAA")
-    _, other = journal(tmp_path, "other.pdf", notebook_id="BBBBBBBB")
+    _, printed = journal(tmp_path, "printed.pdf", notebook_id="AAAAAA")
+    _, other = journal(tmp_path, "other.pdf", notebook_id="BBBBBB")
     report = verify(printed.pdf_path, other.manifest)
     assert not report.ok
     assert report.missing and report.unexpected
 
 
 def test_low_resolution_scans_fail_rather_than_silently_passing(tmp_path):
-    """13mm codes need about 300dpi; at 150 they should not read."""
+    """The check has to have a floor, or it proves nothing.
+
+    The default 16mm codes are deliberately forgiving -- they still read at
+    150dpi, where the old 13mm ECC-M codes did not -- so the floor has moved
+    down rather than away. At 100dpi a module is under three pixels and no
+    amount of processing gets it back.
+    """
     _, result = journal(tmp_path)
-    assert not verify(result.pdf_path, result.manifest, dpi=150).ok
+    assert verify(result.pdf_path, result.manifest, dpi=150).ok
+    assert not verify(result.pdf_path, result.manifest, dpi=100).ok
 
 
 def test_bigger_codes_survive_a_lower_resolution_scan(tmp_path):
@@ -159,7 +166,7 @@ def test_bit_check_rejects_a_different_payload(tmp_path):
     _, result = journal(tmp_path)
     image = render_page(result.pdf_path, 0)
     code = expected_layout(result.manifest)[0][0]
-    wrong = dataclasses.replace(code, payload="PL1:ZZZZZZZZ:9:B:BR:0000")
+    wrong = dataclasses.replace(code, payload="PL1:ZZZZZZ:9:B:BR:0000")
     qr = result.manifest["qr"]
     assert not _bits_match(
         numpy, image, wrong, 300, qr["modules"], qr["quiet_zone_modules"], "m"
@@ -185,9 +192,9 @@ def test_bit_check_rejects_a_blank_region(tmp_path):
 
 
 def test_symbols_this_decoder_cannot_read_still_verify(tmp_path):
-    """Notebook 4APCMDVN page 5 produces a symbol OpenCV refuses to decode --
+    """Notebook 4APCMD page 5 produces a symbol OpenCV refuses to decode --
     even from a pristine render at some scales. It is a correct symbol, so
     verification has to pass it rather than blaming the page."""
-    _, result = journal(tmp_path, pages=8, notebook_id="4APCMDVN")
+    _, result = journal(tmp_path, pages=8, notebook_id="4APCMD")
     report = verify(result.pdf_path, result.manifest)
     assert report.ok, f"missing={report.missing}"
