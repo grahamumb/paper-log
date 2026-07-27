@@ -61,6 +61,19 @@ paperlog init -o journal.yaml
 paperlog build -c journal.yaml --out journal.pdf
 ```
 
+### Just want to print something?
+
+`examples/printable/` holds a ready-made 10-page A5 notebook — PDF, manifest and
+the config that made it — for a real print-and-scan test run:
+
+```bash
+paperlog notebooks --add examples/printable/PAPER1.manifest.json   # so scan can find it
+```
+
+Print it at **100% / actual size** (not "fit to page" — scaling shrinks the codes
+and desynchronises the manifest), double-sided, flipped on the long edge. Full
+instructions and how to check it came out right: `examples/printable/README.md`.
+
 ## Using it end to end
 
 ```bash

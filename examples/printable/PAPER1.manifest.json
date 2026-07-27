@@ -1,0 +1,182 @@
+{
+  "manifest_version": 1,
+  "generator": "paper-log",
+  "created_utc": "2026-07-27T00:00:46+00:00",
+  "notebook": {
+    "id": "PAPER1",
+    "title": "paper-log sample",
+    "page_count": 10,
+    "duplex": true
+  },
+  "page": {
+    "width_mm": 148.0,
+    "height_mm": 210.0,
+    "ruling": "ruled",
+    "line_spacing_mm": 7.0
+  },
+  "token_format": {
+    "version": "PL1",
+    "grammar": "PL1:<notebook>:<page>:<F|B>:<TL|TR|BL|BR>:<crc16>",
+    "checksum": "CRC-16/CCITT-FALSE over the token up to but excluding the final colon, hex, upper case",
+    "alphabet": "Crockford base32 (no I, L, O, U)"
+  },
+  "imposition": "none",
+  "qr": {
+    "enabled": true,
+    "corners": [
+      "TL",
+      "TR",
+      "BL",
+      "BR"
+    ],
+    "payload_template": "{token}",
+    "error_correction": "Q",
+    "quiet_zone_modules": 2,
+    "modules": 25,
+    "module_size_mm": 0.64,
+    "geometry": {
+      "TL": {
+        "x_mm": 5.0,
+        "y_mm": 189.0,
+        "size_mm": 16.0
+      },
+      "TR": {
+        "x_mm": 127.0,
+        "y_mm": 189.0,
+        "size_mm": 16.0
+      },
+      "BL": {
+        "x_mm": 5.0,
+        "y_mm": 5.0,
+        "size_mm": 16.0
+      },
+      "BR": {
+        "x_mm": 127.0,
+        "y_mm": 5.0,
+        "size_mm": 16.0
+      }
+    }
+  },
+  "pages": [
+    {
+      "page": 1,
+      "side": "F",
+      "token": "PPAPER1004CNE",
+      "readable": "PL1:PAPER1:1:F:TL:F504",
+      "codes": {
+        "TL": "PPAPER1004CNE",
+        "TR": "PPAPER10054QC",
+        "BL": "PPAPER1006CHA",
+        "BR": "PPAPER10074K8"
+      }
+    },
+    {
+      "page": 2,
+      "side": "B",
+      "token": "PPAPER1008WDP",
+      "readable": "PL1:PAPER1:2:B:TL:F115",
+      "codes": {
+        "TL": "PPAPER1008WDP",
+        "TR": "PPAPER1009MFM",
+        "BL": "PPAPER100AW9J",
+        "BR": "PPAPER100BMBG"
+      }
+    },
+    {
+      "page": 3,
+      "side": "F",
+      "token": "PPAPER100C84Z",
+      "readable": "PL1:PAPER1:3:F:TL:7E44",
+      "codes": {
+        "TL": "PPAPER100C84Z",
+        "TR": "PPAPER100D06X",
+        "BL": "PPAPER100E80V",
+        "BR": "PPAPER100F02S"
+      }
+    },
+    {
+      "page": 4,
+      "side": "B",
+      "token": "PPAPER100GHZ5",
+      "readable": "PL1:PAPER1:4:B:TL:7CF4",
+      "codes": {
+        "TL": "PPAPER100GHZ5",
+        "TR": "PPAPER100HSX7",
+        "BL": "PPAPER100JHV1",
+        "BR": "PPAPER100KSS3"
+      }
+    },
+    {
+      "page": 5,
+      "side": "F",
+      "token": "PPAPER100M5PC",
+      "readable": "PL1:PAPER1:5:F:TL:F3A5",
+      "codes": {
+        "TL": "PPAPER100M5PC",
+        "TR": "PPAPER100NDME",
+        "BL": "PPAPER100P5J8",
+        "BR": "PPAPER100QDGA"
+      }
+    },
+    {
+      "page": 6,
+      "side": "B",
+      "token": "PPAPER100RNEM",
+      "readable": "PL1:PAPER1:6:B:TL:F7B4",
+      "codes": {
+        "TL": "PPAPER100RNEM",
+        "TR": "PPAPER100SXCP",
+        "BL": "PPAPER100TNAG",
+        "BR": "PPAPER100VX8J"
+      }
+    },
+    {
+      "page": 7,
+      "side": "F",
+      "token": "PPAPER100W17X",
+      "readable": "PL1:PAPER1:7:F:TL:78E5",
+      "codes": {
+        "TL": "PPAPER100W17X",
+        "TR": "PPAPER100X95Z",
+        "BL": "PPAPER100Y13S",
+        "BR": "PPAPER100Z91V"
+      }
+    },
+    {
+      "page": 8,
+      "side": "B",
+      "token": "PPAPER1010TT3",
+      "readable": "PL1:PAPER1:8:B:TL:7717",
+      "codes": {
+        "TL": "PPAPER1010TT3",
+        "TR": "PPAPER1011JR1",
+        "BL": "PPAPER1012TY7",
+        "BR": "PPAPER1013JW5"
+      }
+    },
+    {
+      "page": 9,
+      "side": "F",
+      "token": "PPAPER1014EKA",
+      "readable": "PL1:PAPER1:9:F:TL:F846",
+      "codes": {
+        "TL": "PPAPER1014EKA",
+        "TR": "PPAPER10156H8",
+        "BL": "PPAPER1016EQE",
+        "BR": "PPAPER10176NC"
+      }
+    },
+    {
+      "page": 10,
+      "side": "B",
+      "token": "PPAPER1018YBJ",
+      "readable": "PL1:PAPER1:10:B:TL:EF5B",
+      "codes": {
+        "TL": "PPAPER1018YBJ",
+        "TR": "PPAPER1019P9G",
+        "BL": "PPAPER101AYFP",
+        "BR": "PPAPER101BPDM"
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+# The config behind the sample notebook in this directory.
+#
+#   paperlog build -c examples/printable/notebook.yaml \
+#       --out examples/printable/PAPER1.pdf
+#
+# Everything is at its default except the page count, the title, and the fixed
+# notebook id. The defaults are the point: this is what you get from a bare
+# `paperlog build`, so if it prints and scans well, so will yours.
+#
+# The id is fixed so the committed PDF and manifest always match, and so a
+# rebuild is interchangeable with the committed copy -- the page tokens come out
+# identical, even though the files do not (both the PDF and the manifest carry a
+# build timestamp). Use `paperlog new-id` for a real notebook: two notebooks
+# sharing an id would be filed as one.
+
+notebook_id: PAPER1
+title: "paper-log sample"
+pages: 10
+duplex: true
+page_size: a5
+
+margins:
+  top: 22mm
+  bottom: 22mm
+  inner: 20mm
+  outer: 12mm
+
+ruling:
+  style: ruled
+  spacing: 7mm
+  line_width: 0.4
+  color: "#9eabb9"
+
+qr:
+  corners: all
+  size: 16mm
+  inset: 5mm
+  error_correction: q
+  token_format: compact
+
+fiducials:
+  style: bracket
+
+furniture:
+  date_line: true
+  page_number: true
+  header_rule: true

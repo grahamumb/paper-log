@@ -10,3 +10,9 @@ venv/
 # generated journals
 *.pdf
 *.manifest.json
+
+# ...except the committed sample, which is meant to be printed. The manifest is
+# not optional baggage: without it a photograph of a page cannot be turned back
+# into a page, so the two have to travel together.
+!examples/printable/*.pdf
+!examples/printable/*.manifest.json
