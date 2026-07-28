@@ -28,6 +28,7 @@ if a code would land on top of your writing or come out too small to scan.
 pip install -e .                 # making journals
 pip install -e '.[verify]'       # + `paperlog scan` and `paperlog verify`
 pip install -e '.[verify,heic]'  # + iPhone HEIC photographs
+pip install -e '.[transcribe]'   # + `paperlog transcribe`, handwriting to text
 pip install -e '.[dev]'          # + the test suite
 ```
 
@@ -92,6 +93,10 @@ paperlog ui                                    # or: paperlog build --preset a5-
 paperlog scan photos/ --pdf notebook.pdf
 #    -> pages/K7M2QX/K7M2QX-p0001F.png, ...p0002B.png, ...
 #    -> notebook.pdf, the pages in order
+
+# 5. optional: turn the handwriting into text
+paperlog transcribe pages/K7M2QX/ -o notebook.md
+#    -> notebook.md, one section per page, in reading order
 ```
 
 Step 4 takes no arguments because of step 1: building a notebook files a copy
@@ -127,6 +132,59 @@ moves it somewhere else.
 Each build writes two files: `journal.pdf` to print, and
 `journal.manifest.json` listing every page and the exact string in each of its
 codes — the map your scanning pipeline reads.
+
+## Handwriting to text
+
+`paperlog transcribe` reads the pages `scan` produced and writes Markdown.
+
+```console
+$ export ANTHROPIC_API_KEY=...
+$ paperlog transcribe pages/K7M2QX/ -o notebook.md -d text/
+  K7M2QX-p0001F  84 words
+  K7M2QX-p0002B  blank
+  K7M2QX-p0003F  126 words, 2 unclear
+wrote     3 file(s) to text/
+wrote     notebook.md
+unclear   2 word(s) marked [?] -- worth an eye over
+read      3 page(s), 0 failed (7402 in / 431 out tokens, about $0.05)
+```
+
+Needs `pip install 'paper-log[transcribe]'` and an [API
+key](https://console.anthropic.com/settings/keys). There is deliberately no
+`--api-key` flag: a key on the command line ends up in your shell history and
+in `ps`.
+
+**Why a vision model and not an OCR engine.** Dedicated handwriting recognition
+— Tesseract, TrOCR, the cloud OCR APIs — is trained on line images with a known
+baseline and hands back a flat string. It does not know that the top line of a
+paper-log page is a date, that a dash starts a list item, or that a smudged word
+should be flagged rather than guessed. On modern cursive the frontier vision
+models are also simply more accurate. Structure and honest uncertainty are worth
+more here than raw character accuracy, because a wrong word that looks confident
+is the error you will never catch.
+
+Words the model could not read come back as `[?best-guess]`, or `[?]` where it
+had nothing; the run counts them so you know whether to look. Blank pages come
+back as blank rather than as invented text, and are left out of the combined
+document. `--context notes.txt` takes a file of names and jargon that recur in
+your notes — the fastest fix for a transcript that keeps mangling the same
+surname.
+
+The page identity comes from the filename `scan` wrote, not from the model, so
+sections land in reading order without anything having to interpret a page
+number. Pages are sent one request each: it costs the same (billing is per
+token), a failure loses one page instead of the batch, and one page's
+handwriting cannot colour the reading of the next.
+
+Cost is a couple of cents a page at the default `--model claude-opus-5` — the
+run prints what it actually used. `--model claude-sonnet-5` is cheaper if you
+are doing a whole shelf, and `--effort` trades thinking for spend.
+
+> **Caveat worth stating plainly:** this part is tested against a stand-in for
+> the API, not against the API itself. The request shape is verified against the
+> SDK's own types and a local server, so it will not fail on a malformed
+> request — but how well it reads *your* handwriting is something only your
+> handwriting can answer. Try a page before you queue a notebook.
 
 ## The page identifier
 

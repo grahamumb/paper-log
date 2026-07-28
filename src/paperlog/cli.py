@@ -19,6 +19,10 @@ from .config import (
     load_config,
 )
 from .ids import CORNER_NAMES, TokenError, decode, new_notebook_id
+# Safe to import at module scope: transcribe.py defers `anthropic` and Pillow
+# until a page is actually read, so `paperlog --help` costs nothing.
+from .transcribe import DEFAULT_EFFORT as TRANSCRIBE_EFFORT
+from .transcribe import DEFAULT_MODEL as TRANSCRIBE_MODEL
 from .imposition import padded_count
 from .units import MM, UnitError
 
@@ -423,6 +427,71 @@ def _default_manifest_paths(photos: Sequence[Path]) -> List[Path]:
     return seen
 
 
+def command_transcribe(args: argparse.Namespace) -> int:
+    from .transcribe import TranscribeError, as_markdown, transcribe, write_pages
+
+    pages: List[Path] = []
+    for entry in args.pages:
+        pages.extend(
+            sorted(p for p in entry.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+            if entry.is_dir()
+            else [entry]
+        )
+    if not pages:
+        print("error: no page images to transcribe", file=sys.stderr)
+        return 1
+
+    context = ""
+    if args.context:
+        context = args.context.read_text(encoding="utf-8").strip()
+
+    def report(path: Path, page, error: Optional[str]) -> None:
+        if error is not None:
+            print(f"  failed  {path.name}: {error}", file=sys.stderr)
+            return
+        summary = "blank" if page.blank else f"{len(page.text.split())} words"
+        unsure = f", {len(page.unsure)} unclear" if page.unsure else ""
+        print(f"  {page.name}  {summary}{unsure}")
+
+    try:
+        run = transcribe(
+            pages,
+            model=args.model,
+            effort=args.effort,
+            context=context,
+            on_page=report,
+        )
+    except TranscribeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.out_dir:
+        written = write_pages(run, args.out_dir)
+        print(f"wrote     {len(written)} file(s) to {args.out_dir}")
+    # With neither destination given, print it. Transcription costs money;
+    # spending it and then dropping the result on the floor is not a default.
+    target = args.out if (args.out or args.out_dir) else Path("-")
+    if target is not None:
+        document = as_markdown(run)
+        if str(target) == "-":
+            sys.stdout.write(document)
+        else:
+            target.write_text(document, encoding="utf-8")
+            print(f"wrote     {target}")
+
+    unclear = sum(len(page.unsure) for page in run.transcripts)
+    if unclear:
+        print(f"unclear   {unclear} word(s) marked [?] -- worth an eye over")
+
+    cost = run.cost(args.model)
+    spend = f", about ${cost:.2f}" if cost is not None else ""
+    print(
+        f"read      {len(run.transcripts)} page(s), {len(run.failures)} failed"
+        f" ({run.input_tokens} in / {run.output_tokens} out tokens{spend})"
+    )
+    return 1 if run.failures and not run.transcripts else 0
+
+
 def command_ui(args: argparse.Namespace) -> int:
     from .webui import serve
 
@@ -537,6 +606,25 @@ def build_parser() -> argparse.ArgumentParser:
     scan_cmd.add_argument("--no-library", action="store_true",
                           help="ignore the notebooks registered in ~/.paperlog")
     scan_cmd.set_defaults(func=command_scan)
+
+    transcribe_cmd = subparsers.add_parser(
+        "transcribe", help="read the handwriting off flattened pages"
+    )
+    transcribe_cmd.add_argument("pages", nargs="+", type=Path,
+                                help="page images or directories, as written by `scan`")
+    transcribe_cmd.add_argument("-o", "--out", type=Path,
+                                help="one Markdown file for the lot ('-' for stdout)")
+    transcribe_cmd.add_argument("-d", "--out-dir", type=Path,
+                                help="also write one .md per page, named to match")
+    transcribe_cmd.add_argument("--model", default=TRANSCRIBE_MODEL,
+                                help=f"(default: {TRANSCRIBE_MODEL})")
+    transcribe_cmd.add_argument("--effort", choices=("low", "medium", "high"),
+                                default=TRANSCRIBE_EFFORT,
+                                help=f"how hard to think per page (default: {TRANSCRIBE_EFFORT})")
+    transcribe_cmd.add_argument("--context", type=Path, metavar="FILE",
+                                help="names and jargon that appear in your notes, to "
+                                     "settle ambiguous words")
+    transcribe_cmd.set_defaults(func=command_transcribe)
 
     ui_cmd = subparsers.add_parser("ui", help="design a notebook in the browser, with a live preview")
     ui_cmd.add_argument("--port", type=int, default=8765)

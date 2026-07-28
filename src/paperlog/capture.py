@@ -436,14 +436,106 @@ def flatten(
 ENHANCEMENTS = ("none", "flatten", "scan")
 
 
-def enhance(image, mode: str = "flatten"):
-    """Even out the lighting on a flattened page.
+#: Non-local means strength. Chosen by measuring what survives: at h=7 the grey
+#: printed ruling -- the faintest thing on a real page, and a fair stand-in for
+#: pencil -- comes through within 2 levels of untouched, while grain in blank
+#: paper goes to nothing. A bilateral filter is three times faster and was
+#: rejected: it lifted that same ruling by 40 levels, which is what erasing
+#: pencil looks like.
+DENOISE_STRENGTH = 7
 
-    A photograph carries the lamp with it: one corner bright, the opposite one
-    in shadow, which looks wrong next to a flatbed scan and wrecks any later
-    thresholding. Dividing by a heavily blurred copy of the page estimates that
-    illumination and cancels it, leaving paper uniformly white and ink where it
-    was.
+#: Fraction of the measured paper level that becomes pure white. Paper is not
+#: one value but a spread, so the white point has to sit slightly inside the
+#: peak for the bulk of it to clip clean.
+WHITE_POINT = 0.96
+
+#: Unsharp amount. 0.75 starts to ring around thick strokes; 0.5 does not.
+SHARPEN = 0.5
+
+
+def _illumination(cv2, numpy, gray):
+    """Estimate the lighting across the page: what paper came out at, where.
+
+    Two things have to be kept out of the estimate. Handwriting and ruling are
+    removed by a morphological close, which fills in anything darker and
+    narrower than its kernel.
+
+    The corner codes are the harder case, and a close makes them worse rather
+    than better: its dilate step takes a local maximum, and the brightest white
+    module inside a code reads brighter than average paper does. Blurring that
+    spreads a raised estimate outward, the division darkens the paper around
+    each code to compensate, and every corner ends up wearing a grey halo --
+    invisible while the whole page was grey, obvious once it is white.
+
+    So the smoothing is a wide median rather than a blur. A median discards
+    outliers instead of averaging them in, which is exactly the difference
+    needed: the codes stop contributing at all. It runs on a shrunken copy,
+    both because a median that wide would otherwise be slow and because
+    illumination has no fine detail to lose.
+    """
+    kernel_size = max(int(min(gray.shape[:2]) * 0.02) | 1, 15)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    closed = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+
+    height, width = gray.shape[:2]
+    small = cv2.resize(
+        closed, (max(width // 8, 1), max(height // 8, 1)), interpolation=cv2.INTER_AREA
+    )
+    # The window has to be wider than a code is at this scale, or the median
+    # has nothing to outvote it with. Shrink it for images too small to hold
+    # one -- test fixtures, mostly -- where there is no halo to fix anyway.
+    span = min(small.shape[:2])
+    window = min(41, span - 1 if span % 2 == 0 else span - 2)
+    if window >= 3:
+        smoothed = cv2.medianBlur(small.astype(numpy.uint8), window).astype(numpy.float32)
+    else:
+        smoothed = small
+    smoothed = cv2.GaussianBlur(smoothed, (0, 0), 3)
+
+    paper = cv2.resize(smoothed, (width, height), interpolation=cv2.INTER_CUBIC)
+    # A floor, so a page that is mostly ink cannot drive the estimate to zero
+    # and divide by nothing.
+    return numpy.maximum(paper, 0.6 * float(numpy.median(paper)))
+
+
+def _paper_level(cv2, numpy, image) -> float:
+    """The grey the paper actually came out at: the mode of the bright half.
+
+    The mean is no good -- it moves with how much was written on the page --
+    and neither is a high percentile, which lands in the noise above the paper
+    peak. The mode is neither, which is what makes a full page and a blank one
+    come out the same white.
+    """
+    histogram = cv2.calcHist([image.astype(numpy.uint8)], [0], None, [256], [0, 256]).ravel()
+    histogram[:128] = 0
+    if histogram.sum() < 0.01 * image.size:
+        # Almost nothing bright: a photograph of something that is not a page,
+        # or one so dark there is no paper to find. Leave the level alone
+        # rather than invent a white point out of a handful of pixels.
+        return 250.0
+    return float(numpy.argmax(histogram))
+
+
+def enhance(image, mode: str = "flatten"):
+    """Make a flattened page look like a scan rather than a photograph.
+
+    Three things separate the two, and they are dealt with in order.
+
+    *The lamp.* A photograph carries its lighting with it: one corner bright,
+    the opposite one in shadow. Dividing by an estimate of that illumination
+    cancels it. See ``_illumination``.
+
+    *The grain.* Sensor noise that was invisible in the photograph becomes
+    obvious once the contrast is opened up, and it is the main reason a
+    photographed page reads as grubby. Non-local means removes it by averaging
+    pixels with similar neighbourhoods rather than with their neighbours, so
+    strokes stay put while noise averages away. It runs first, so the
+    illumination estimate is made on clean data.
+
+    *The paper.* Cancelling the lamp puts paper at a known level but not at
+    white, because the estimate does not sit exactly on the paper it is
+    estimating. Measuring where paper actually landed and mapping that to white
+    is what turns a grey page white, and it is worth more than the denoising.
 
     ``flatten`` keeps the greys, which suits handwriting and pencil. ``scan``
     pushes on to near black-and-white for the smallest files and the crispest
@@ -455,24 +547,9 @@ def enhance(image, mode: str = "flatten"):
         raise CaptureError(f"unknown enhancement {mode!r}; use one of {', '.join(ENHANCEMENTS)}")
 
     cv2, numpy, _ = load_backend()
-    gray = image.astype(numpy.float32)
-
-    # Estimate the paper level by closing away everything darker than the
-    # kernel -- handwriting, ruling, print. A plain blur would do, but it gets
-    # dragged down by the corner codes and leaves bright haloes around them.
-    kernel_size = max(int(min(gray.shape[:2]) * 0.02) | 1, 15)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    paper = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-    paper = cv2.GaussianBlur(paper, (0, 0), kernel_size)
-    # The codes are far wider than any kernel that would leave ink alone, so
-    # clamp the estimate: without this the page brightens around each symbol.
-    paper = numpy.maximum(paper, 0.6 * float(numpy.median(paper)))
-
-    # Dividing by the paper level puts white at a known place, which is the
-    # whole point -- so there is no black point left to stretch. Stretching one
-    # anyway is what turns a blank page grey and grainy: on a page that is 98%
-    # paper, the 2nd percentile *is* paper, and rescaling from it amplifies
-    # nothing but sensor noise.
+    denoised = cv2.fastNlMeansDenoising(image, None, DENOISE_STRENGTH, 7, 21)
+    gray = denoised.astype(numpy.float32)
+    paper = _illumination(cv2, numpy, gray)
     normalised = numpy.clip(gray / numpy.maximum(paper, 1.0) * 250.0, 0, 255)
 
     if mode == "scan":
@@ -481,10 +558,19 @@ def enhance(image, mode: str = "flatten"):
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 12
         )
 
-    # A mild gamma deepens ink without touching paper: 250 stays 250, while a
-    # mid-grey pencil stroke drops usefully darker.
-    curved = 255.0 * numpy.power(normalised / 255.0, 1.4)
-    return numpy.clip(curved, 0, 255).astype(numpy.uint8)
+    # Put the measured paper level at white and pull the rest up with it. Note
+    # there is still no black point being stretched: doing that is what turns a
+    # blank page grey and grainy, because on a page that is 98% paper the 2nd
+    # percentile *is* paper. Only the white end moves.
+    white = _paper_level(cv2, numpy, normalised) * WHITE_POINT
+    curved = 255.0 * numpy.power(numpy.clip(normalised / max(white, 1.0), 0, 1), 1.5)
+
+    # Unsharp masking against a wide blur. Paper is flat and already clipped to
+    # white, so it has no detail to exaggerate and stays put; only the edges of
+    # strokes move, which is what recovers the bite a camera's optics take out.
+    blurred = cv2.GaussianBlur(curved, (0, 0), 1.6)
+    sharpened = cv2.addWeighted(curved, 1.0 + SHARPEN, blurred, -SHARPEN, 0)
+    return numpy.clip(sharpened, 0, 255).astype(numpy.uint8)
 
 
 #: Formats OpenCV reads directly. HEIC is deliberately absent: iPhones shoot it

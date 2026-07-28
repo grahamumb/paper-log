@@ -20,6 +20,8 @@ dependencies = [
 verify = ["pypdfium2>=4.0", "opencv-python-headless>=4.8", "numpy>=1.24", "pillow>=10.0"]
 # iPhones shoot HEIC by default and OpenCV cannot read it.
 heic = ["pillow-heif>=0.13"]
+# `paperlog transcribe` reads the handwriting off flattened pages.
+transcribe = ["anthropic>=0.40", "pillow>=10.0"]
 dev = ["pytest>=7.0", "paper-log[verify]", "paper-log[heic]"]
 
 [project.scripts]

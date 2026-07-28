@@ -20,6 +20,7 @@ from paperlog.capture import (  # noqa: E402
     enhance,
     flatten,
     group_by_page,
+    _illumination,
     load_backend,
     load_manifests,
     process,
@@ -215,13 +216,59 @@ def test_enhancement_whitens_paper_without_greying_it(notebook, render_page, pho
     page = flatten(phone(render_page(result.pdf_path, 0), seed=10), manifests)[0]
 
     lit = enhance(page.image, "flatten")
-    assert float(numpy.median(lit)) > 200
+    # Not merely "bright": paper reaches white, and most of the page is at it.
+    assert float(numpy.median(lit)) == 255
+    assert float((lit == 255).mean()) > 0.75
     # Ink survives: the corner codes are still properly dark somewhere.
     assert float(numpy.percentile(lit, 0.5)) < 120
 
     scanned = enhance(page.image, "scan")
     assert set(numpy.unique(scanned)) <= {0, 255}
     assert float(numpy.median(scanned)) == 255
+
+
+def test_the_illumination_estimate_ignores_the_codes(notebook, render_page, phone):
+    """Paper next to a code must estimate the same as paper anywhere else.
+
+    This is measured against a built page rather than a photographed one,
+    because the phone simulator cannot produce the effect: it adds Gaussian
+    noise to a synthetic render, where paper and the white modules inside a code
+    are the same exact value. A real camera's processing overshoots white next
+    to black -- on the test photograph the white modules read 211 against the
+    paper's 194 -- and a morphological close takes a local maximum, so the
+    estimate over a code came out at 230 against the paper's 190. Blurring
+    spread that outward and the division darkened the paper around every corner
+    into a grey square, invisible while the whole page was grey and obvious once
+    it was white.
+
+    So the overshoot is put in deliberately, which is the only part of a
+    photograph this needs to imitate.
+    """
+    import numpy
+
+    _, result, _ = notebook
+    page = render_page(result.pdf_path, 0).astype(numpy.float32)
+    height, width = page.shape[:2]
+
+    # Paper below pure white, so the overshoot has somewhere to go.
+    page = numpy.clip(page * 0.75, 0, 255)
+    white = page > 180
+    box = int(width * 0.14)
+    corner = numpy.zeros_like(white)
+    corner[:box, :box] = True
+    page[white & corner] = 255.0        # the overshoot, only inside the code
+
+    cv2, numpy_, _ = load_backend()
+    estimate = _illumination(cv2, numpy_, page)
+
+    # Immediately beside the code, which is the only place this shows: the
+    # blur that caused it had a radius of about 35px, so 100px away both
+    # estimates are already identical and the test would prove nothing.
+    beside = estimate[box + 5 : box + 60, :box]
+    away = estimate[height // 2 : height // 2 + 55, :box]
+
+    excess = float(beside.mean()) / float(away.mean()) - 1.0
+    assert excess < 0.03, f"the codes are still lifting the estimate by {excess:.1%}"
 
 
 def test_enhancement_evens_out_the_lighting(notebook, render_page, phone):
