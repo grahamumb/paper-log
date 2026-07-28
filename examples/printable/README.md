@@ -20,9 +20,13 @@ The one thing that matters, whether you use your own printer or a shop:
 > **Print at 100% / "actual size". Do not use "fit to page", "shrink to fit", or
 > "scale to fit printable area".**
 
-Scaling is the failure that looks fine and isn't. A page reduced to 96% to fit a
-printer's margins still *looks* right, but every code shrinks with it, and the
-geometry recorded in the manifest no longer matches the paper.
+A page reduced to 96% to fit a printer's margins still looks right, and the
+scanner will not complain: everything on the page shrinks together, so the
+recovered image comes out correctly proportioned either way. What you lose is
+decoding margin. Every module shrinks with the page, and the codes are already
+sized for a phone camera at arm's length rather than for a comfortable surplus.
+Print small enough and pages simply stop being recognised, with nothing to point
+at as the cause.
 
 For a print shop, the order is:
 
@@ -42,17 +46,21 @@ margins. Cutting an A4 sheet down to A5 by hand after printing at 100% is safer.
 
 ## Checking it came out right
 
-1. **Measure the page.** It should be 148 × 210 mm. If it is 142 × 202 or
-   similar, it was scaled — reprint with scaling off.
-2. **Scan or photograph a page** and run it back through:
+1. **Measure the page with a ruler.** It should be 148 × 210 mm. This is the
+   only way to catch a scaled print — nothing downstream can, because a photo
+   carries no sense of absolute size, so a 96% print of an A5 page and a real A5
+   page an inch further from the lens are the same picture.
+2. **Photograph a page** and run it back through:
 
    ```bash
    paperlog notebooks --add examples/printable/PAPER1.manifest.json
    paperlog scan my-photo.jpg -o pages/
    ```
 
-   A `fit` under about 0.6mm means the geometry is intact. Codes that decode but
-   fit badly are the signature of a scaled print.
+   Four codes and a `fit` under about 0.6mm means the page was read cleanly.
+   `fit` measures whether the four corners agree with each other about a flat
+   page, so it catches a curled or creased sheet, a misread code, or a photo
+   taken at too steep an angle — not scale.
 
 You do not need to write in it first — the codes are what is being tested, and
 a blank page tests them just as well.

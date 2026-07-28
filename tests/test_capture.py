@@ -20,6 +20,7 @@ from paperlog.capture import (  # noqa: E402
     enhance,
     flatten,
     group_by_page,
+    load_backend,
     load_manifests,
     process,
 )
@@ -73,6 +74,41 @@ def test_the_fit_is_accurate_to_a_fraction_of_a_millimetre(notebook, render_page
         assert len(page.codes) == 4, f"seed {seed}: only {len(page.codes)} codes"
         assert page.residual_mm < 0.6, f"seed {seed}: {page.residual_mm}mm"
         assert page.confident
+
+
+def test_a_scaled_print_is_recovered_correctly_and_silently(
+    notebook, render_page, phone
+):
+    """A page printed at 96% comes back right, and nothing notices. Both halves
+    of that matter, and the printing guide depends on them.
+
+    A homography carries a uniform scale factor, so shrinking the whole page
+    shrinks the codes and their spacing together and the fit absorbs it. The
+    recovered page is still correctly proportioned -- the geometry is anchored to
+    the manifest's millimetres, not to the paper. But the residual stays flat, so
+    it cannot be read as evidence that a print came out at full size. Only a
+    ruler can tell you that: a photograph has no sense of absolute scale, and a
+    small print is indistinguishable from a distant one.
+    """
+    cv2, _, _ = load_backend()
+    _, result, manifests = notebook
+    picture = phone(render_page(result.pdf_path, 0), seed=3)
+
+    residuals = {}
+    for scale in (1.0, 0.96, 0.9):
+        shrunk = cv2.resize(picture, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        page = flatten(shrunk, manifests)[0]
+        assert len(page.codes) == 4, f"{scale}: only {len(page.codes)} codes"
+        assert not page.warnings, f"{scale}: {page.warnings}"
+
+        height, width = page.image.shape[:2]
+        assert width == pytest.approx(148 / 25.4 * 300, abs=2)
+        assert height == pytest.approx(210 / 25.4 * 300, abs=2)
+        residuals[scale] = page.residual_mm
+
+    assert max(residuals.values()) < 0.6, residuals
+    spread = max(residuals.values()) - min(residuals.values())
+    assert spread < 0.3, f"residual tracks print scale after all: {residuals}"
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])

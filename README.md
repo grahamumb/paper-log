@@ -70,8 +70,9 @@ the config that made it — for a real print-and-scan test run:
 paperlog notebooks --add examples/printable/PAPER1.manifest.json   # so scan can find it
 ```
 
-Print it at **100% / actual size** (not "fit to page" — scaling shrinks the codes
-and desynchronises the manifest), double-sided, flipped on the long edge. Full
+Print it at **100% / actual size** (not "fit to page" — scaling shrinks the
+codes, and the decoding margin is what you are spending), double-sided, flipped
+on the long edge. Full
 instructions and how to check it came out right: `examples/printable/README.md`.
 
 ## Using it end to end
