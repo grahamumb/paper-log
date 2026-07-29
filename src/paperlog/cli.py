@@ -19,10 +19,13 @@ from .config import (
     load_config,
 )
 from .ids import CORNER_NAMES, TokenError, decode, new_notebook_id
-# Safe to import at module scope: transcribe.py defers `anthropic` and Pillow
-# until a page is actually read, so `paperlog --help` costs nothing.
-from .transcribe import DEFAULT_EFFORT as TRANSCRIBE_EFFORT
-from .transcribe import DEFAULT_MODEL as TRANSCRIBE_MODEL
+# Safe to import at module scope: vision.py defers `anthropic` and Pillow until
+# a page is actually read, so `paperlog --help` costs nothing.
+from .transcribe import CONFIG_FILENAME as TRANSCRIBE_CONFIG_NAME
+from .vision import DEFAULT_EFFORT as TRANSCRIBE_EFFORT
+from .vision import DEFAULT_MODEL as TRANSCRIBE_MODEL
+from .vision import EFFORTS as VISION_EFFORTS
+from .vision import PROVIDERS as VISION_PROVIDERS
 from .imposition import padded_count
 from .units import MM, UnitError
 
@@ -427,8 +430,57 @@ def _default_manifest_paths(photos: Sequence[Path]) -> List[Path]:
     return seen
 
 
+def transcribe_overrides(args: argparse.Namespace) -> Dict[str, Any]:
+    """Turn the transcribe flags into a config patch, so flags beat the file."""
+    vision: Dict[str, Any] = {}
+    for flag, key in (
+        ("model", "model"),
+        ("effort", "effort"),
+        ("provider", "provider"),
+        ("base_url", "base_url"),
+        ("api_key_env", "api_key_env"),
+        ("max_edge", "max_edge"),
+        ("max_pixels", "max_pixels"),
+        ("max_tokens", "max_tokens"),
+    ):
+        value = getattr(args, flag, None)
+        if value is not None:
+            vision[key] = value
+
+    overrides: Dict[str, Any] = {}
+    if vision:
+        overrides["vision"] = vision
+    if getattr(args, "prompt", None) is not None:
+        overrides["prompt_file"] = str(args.prompt)
+    if getattr(args, "context", None) is not None:
+        overrides["context_file"] = str(args.context)
+    return overrides
+
+
 def command_transcribe(args: argparse.Namespace) -> int:
-    from .transcribe import TranscribeError, as_markdown, transcribe, write_pages
+    from .transcribe import (
+        EXAMPLE_CONFIG,
+        TranscribeError,
+        as_markdown,
+        default_config_path,
+        load_transcribe_config,
+        transcribe,
+        write_pages,
+    )
+
+    if args.write_config:
+        target = args.config or default_config_path()
+        if target.exists() and not args.force:
+            print(f"error: {target} exists; --force to overwrite", file=sys.stderr)
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(EXAMPLE_CONFIG, encoding="utf-8")
+        print(f"wrote {target}")
+        return 0
+
+    if not args.pages:
+        print("error: no pages given", file=sys.stderr)
+        return 1
 
     pages: List[Path] = []
     for entry in args.pages:
@@ -441,9 +493,22 @@ def command_transcribe(args: argparse.Namespace) -> int:
         print("error: no page images to transcribe", file=sys.stderr)
         return 1
 
-    context = ""
-    if args.context:
-        context = args.context.read_text(encoding="utf-8").strip()
+    try:
+        config = load_transcribe_config(args.config, transcribe_overrides(args))
+    except TranscribeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"model     {config.vision.model} (effort {config.vision.effort})")
+    edge, pixels = config.vision.limits
+    if config.vision.limits_are_a_guess:
+        print(
+            f"warning   no image limits known for {config.vision.model}; assuming "
+            f"{edge}px / {pixels / 1e6:.2f}MP. If it accepts more, set "
+            "vision.max_edge and vision.max_pixels -- an undersized image costs "
+            "accuracy on handwriting.",
+            file=sys.stderr,
+        )
 
     def report(path: Path, page, error: Optional[str]) -> None:
         if error is not None:
@@ -454,36 +519,33 @@ def command_transcribe(args: argparse.Namespace) -> int:
         print(f"  {page.name}  {summary}{unsure}")
 
     try:
-        run = transcribe(
-            pages,
-            model=args.model,
-            effort=args.effort,
-            context=context,
-            on_page=report,
-        )
+        run = transcribe(pages, config, on_page=report)
     except TranscribeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if args.out_dir:
-        written = write_pages(run, args.out_dir)
-        print(f"wrote     {len(written)} file(s) to {args.out_dir}")
-    # With neither destination given, print it. Transcription costs money;
-    # spending it and then dropping the result on the floor is not a default.
-    target = args.out if (args.out or args.out_dir) else Path("-")
-    if target is not None:
-        document = as_markdown(run)
+    if run.transcripts:
+        if args.out_dir:
+            written = write_pages(run, args.out_dir)
+            print(f"wrote     {len(written)} file(s) to {args.out_dir}")
+        # With neither destination given, print it. Transcription costs money;
+        # spending it and then dropping the result on the floor is not a default.
+        target = args.out if (args.out or args.out_dir) else Path("-")
+        document = as_markdown(run, skip_blank=config.skip_blank)
         if str(target) == "-":
             sys.stdout.write(document)
         else:
             target.write_text(document, encoding="utf-8")
             print(f"wrote     {target}")
+    elif args.out:
+        # Nothing was read, so there is nothing to write. Creating the file
+        # anyway would leave an empty document that looks like a real result.
+        print(f"note      nothing transcribed; {args.out} left alone", file=sys.stderr)
 
-    unclear = sum(len(page.unsure) for page in run.transcripts)
-    if unclear:
-        print(f"unclear   {unclear} word(s) marked [?] -- worth an eye over")
+    if run.unsure_count:
+        print(f"unclear   {run.unsure_count} word(s) marked [?] -- worth an eye over")
 
-    cost = run.cost(args.model)
+    cost = run.cost()
     spend = f", about ${cost:.2f}" if cost is not None else ""
     print(
         f"read      {len(run.transcripts)} page(s), {len(run.failures)} failed"
@@ -608,19 +670,42 @@ def build_parser() -> argparse.ArgumentParser:
     scan_cmd.set_defaults(func=command_scan)
 
     transcribe_cmd = subparsers.add_parser(
-        "transcribe", help="read the handwriting off flattened pages"
+        "transcribe",
+        help="read the handwriting off flattened pages",
+        description="Reads pages with a vision model. Settings come from "
+                    f"$PAPERLOG_HOME/{TRANSCRIBE_CONFIG_NAME} if it exists; flags "
+                    "below override it. `--write-config` starts you a file.",
     )
-    transcribe_cmd.add_argument("pages", nargs="+", type=Path,
+    transcribe_cmd.add_argument("pages", nargs="*", type=Path,
                                 help="page images or directories, as written by `scan`")
     transcribe_cmd.add_argument("-o", "--out", type=Path,
                                 help="one Markdown file for the lot ('-' for stdout)")
     transcribe_cmd.add_argument("-d", "--out-dir", type=Path,
                                 help="also write one .md per page, named to match")
-    transcribe_cmd.add_argument("--model", default=TRANSCRIBE_MODEL,
-                                help=f"(default: {TRANSCRIBE_MODEL})")
-    transcribe_cmd.add_argument("--effort", choices=("low", "medium", "high"),
-                                default=TRANSCRIBE_EFFORT,
+    transcribe_cmd.add_argument("-c", "--config", type=Path,
+                                help="settings file (default: "
+                                     f"$PAPERLOG_HOME/{TRANSCRIBE_CONFIG_NAME})")
+    transcribe_cmd.add_argument("--write-config", action="store_true",
+                                help="write a commented starter config and exit")
+    transcribe_cmd.add_argument("--force", action="store_true",
+                                help="with --write-config, overwrite an existing file")
+    transcribe_cmd.add_argument("--provider", choices=VISION_PROVIDERS,
+                                help=f"(default: {VISION_PROVIDERS[0]})")
+    transcribe_cmd.add_argument("--model", help=f"(default: {TRANSCRIBE_MODEL})")
+    transcribe_cmd.add_argument("--effort", choices=VISION_EFFORTS,
                                 help=f"how hard to think per page (default: {TRANSCRIBE_EFFORT})")
+    transcribe_cmd.add_argument("--base-url", help="point at a gateway, proxy or stub")
+    transcribe_cmd.add_argument("--api-key-env", metavar="VAR",
+                                help="which environment variable holds the key "
+                                     "(default: ANTHROPIC_API_KEY)")
+    transcribe_cmd.add_argument("--max-tokens", type=int,
+                                help="output budget per page, shared with thinking")
+    transcribe_cmd.add_argument("--max-edge", type=int, metavar="PX",
+                                help="override the model's image long-edge limit")
+    transcribe_cmd.add_argument("--max-pixels", type=int, metavar="N",
+                                help="override the model's image area limit")
+    transcribe_cmd.add_argument("--prompt", type=Path, metavar="FILE",
+                                help="replace the transcription prompt")
     transcribe_cmd.add_argument("--context", type=Path, metavar="FILE",
                                 help="names and jargon that appear in your notes, to "
                                      "settle ambiguous words")

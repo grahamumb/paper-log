@@ -154,6 +154,43 @@ key](https://console.anthropic.com/settings/keys). There is deliberately no
 `--api-key` flag: a key on the command line ends up in your shell history and
 in `ps`.
 
+### Configuring it
+
+Settings live in `$PAPERLOG_HOME/transcribe.yaml` (default `~/.paperlog/`), and
+flags override the file. `paperlog transcribe --write-config` writes a commented
+starter.
+
+```yaml
+vision:
+  provider: anthropic
+  model: claude-opus-5
+  effort: low               # low | medium | high | xhigh | max
+  base_url: ...             # a gateway, a proxy, a local stub
+  api_key_env: ANTHROPIC_API_KEY
+  max_edge: 2576            # unset = look them up from the model
+  max_pixels: 3750000
+prompt_file: ~/notes/transcription-prompt.md
+context_file: ~/notes/glossary.txt
+```
+
+Only the *name* of the key variable is configurable, never the key — so the
+file stays safe to commit. There is no `api_key` field to put one in, and
+setting one is a config error rather than a silent leak.
+
+**Image size is per model, and it matters more than you'd think.** A vision
+model resizes anything over its limit server-side, throwing away resolution
+you were relying on. The current models take 2576px on the long edge and
+3.75MP; Haiku 4.5 and everything before the high-resolution tier take 1568px
+and 1.15MP — under half the pixel area. paper-log looks the limits up from the
+model name rather than sizing once for the biggest, which is the difference
+between choosing your resolution and having it chosen. For a model it doesn't
+recognise it falls back to the smaller tier and says so on stderr; `max_edge` /
+`max_pixels` override it.
+
+Everything that names a vendor lives in one module (`paperlog/vision.py`)
+behind a `read(image) -> Reply` seam, so a second provider is a class there
+rather than a change to transcription. Anthropic is what ships.
+
 **Why a vision model and not an OCR engine.** Dedicated handwriting recognition
 — Tesseract, TrOCR, the cloud OCR APIs — is trained on line images with a known
 baseline and hands back a flat string. It does not know that the top line of a
@@ -176,9 +213,10 @@ number. Pages are sent one request each: it costs the same (billing is per
 token), a failure loses one page instead of the batch, and one page's
 handwriting cannot colour the reading of the next.
 
-Cost is a couple of cents a page at the default `--model claude-opus-5` — the
-run prints what it actually used. `--model claude-sonnet-5` is cheaper if you
-are doing a whole shelf, and `--effort` trades thinking for spend.
+Cost is a couple of cents a page at the default `claude-opus-5` — the run
+prints what it actually used, priced from the model that ran. Sonnet is cheaper
+if you are doing a whole shelf; Haiku cheaper still, but see the resolution note
+above before reaching for it on handwriting.
 
 > **Caveat worth stating plainly:** this part is tested against a stand-in for
 > the API, not against the API itself. The request shape is verified against the
