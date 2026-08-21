@@ -1,20 +1,21 @@
 """Requests written on paper: finding them, reading them, running them.
 
 The property most of this file exists to protect is **isolation**. The writer
-draws a box around a request; what reaches the model that answers it must be
-that request and nothing else -- not the paragraph above it, not the rest of the
-page, not the other requests in the same run. If prose leaks in, the answer
-starts getting tailored to writing the author never meant to submit, and
-authorial control quietly moves from the person to the machine.
+boxes a request; what reaches the model that answers it must be that request and
+nothing else -- not the paragraph above it, not the rest of the page, not the
+other requests in the same run. If prose leaks in, the answer gets tailored to
+writing the author never meant to submit, and authorial control moves quietly
+from the person to the machine.
 
-That property is enforced structurally rather than by asking nicely, so it can
-be tested structurally: the crop is checked to contain no surrounding ink, and
-the dispatched request is checked to contain no surrounding words.
+The guarantee is a division of labour rather than a promise. The transcriber
+sees the whole page but only copies it. The extractor decides what the request
+is but only ever sees text, by pattern match, with no model involved. So no
+model both sees the context and shapes the request -- and the tests below check
+the far end of that pipe, where the dispatched request is inspected for any
+trace of the words that surrounded it.
 """
 
 import json
-import math
-import random
 
 import pytest
 
@@ -28,7 +29,7 @@ from paperlog.calls import (
     normalise_prompt,
 )
 from paperlog.cli import main
-from paperlog.extract import UNKNOWN_TOOL, extract_from_page, parse_reply
+from paperlog.extract import UNKNOWN_TOOL, find_calls, strip_calls
 from paperlog.tools import (
     BUILTIN_TOOLS,
     ToolError,
@@ -38,234 +39,126 @@ from paperlog.tools import (
     run_call,
     strip_fence,
 )
-pytest.importorskip("cv2", reason="needs the [verify] extras")
+from paperlog.ids import PageRef
 
-from paperlog.boxes import crop, find_boxes  # noqa: E402
-from paperlog.capture import enhance, flatten, load_manifests  # noqa: E402
+REF = PageRef("K7M2QX", 1, "F", "TL")
 
-
-# -- drawing a page a person might have written -----------------------------
-
-
-def _wobble(image, start, end, rng, thickness=4, jitter=3.0):
-    """A pen line. Never straight, and the hand shakes."""
-    import cv2
-
-    points = []
-    for step in range(41):
-        t = step / 40
-        x = start[0] + (end[0] - start[0]) * t + rng.gauss(0, jitter) + math.sin(t * 6) * jitter
-        y = start[1] + (end[1] - start[1]) * t + rng.gauss(0, jitter) + math.cos(t * 5) * jitter
-        points.append((int(x), int(y)))
-    for a, b in zip(points, points[1:]):
-        cv2.line(image, a, b, 20, max(1, thickness + rng.randint(-1, 1)), cv2.LINE_AA)
-
-
-def draw_box(image, x, y, width, height, seed=0):
-    rng = random.Random(seed)
-    corners = [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]
-    for a, b in zip(corners, corners[1:] + corners[:1]):
-        _wobble(image, a, b, rng)
-    return (x, y, width, height)
-
-
-def write(image, x, y, text, scale=1.0):
-    import cv2
-
-    cv2.putText(image, text, (x, y), cv2.FONT_HERSHEY_SCRIPT_SIMPLEX, scale, 25, 3,
-                cv2.LINE_AA)
-
-
-@pytest.fixture
-def notebook(tmp_path):
-    config = JournalConfig.from_dict(
-        {"page_size": "a5", "pages": 4, "notebook_id": "K7M2QX"}
-    )
-    result = build(config, tmp_path / "journal.pdf")
-    return result, load_manifests([result.manifest_path])
-
-
-@pytest.fixture
-def rendered(notebook, render_page):
-    result, manifests = notebook
-    return result, manifests, render_page(result.pdf_path, 0)
-
-
-#: The words that surround the box. If any of these ever reach a model, the
-#: isolation the whole design rests on has been lost -- so they are distinctive
-#: enough to search for.
+#: The words that surround a request in the transcript. If any of these ever
+#: reach the model that answers it, the isolation the design rests on is gone --
+#: so they are distinctive enough to search for.
 SURROUNDING = [
     "Kestrel migration notes for chapter nine",
     "and the funding deadline is on Tuesday",
 ]
 
 
-def boxed_page(page, phone, seed=0, box=(250, 430, 1180, 300)):
-    """A page with prose above and below a boxed request."""
-    import numpy
-
-    page = numpy.array(page, copy=True)
-    write(page, 240, 330, SURROUNDING[0], scale=0.95)
-    truth = draw_box(page, *box, seed=seed)
-    write(page, 300, 520, "TOOL research-request", scale=0.85)
-    write(page, 300, 620, "books on the black plague", scale=0.85)
-    write(page, 240, 900, SURROUNDING[1], scale=0.95)
-    return page, truth
+def transcript(*, fenced=True, tool="research-request", body="books on the black plague"):
+    """A page transcript shaped the way the transcriber is asked to write one."""
+    if fenced:
+        request = f"```paperlog-tool {tool}\n{body}\n```"
+    else:
+        request = f"TOOL {tool}\n{body}\nEND"
+    return f"{SURROUNDING[0]}\n\n{request}\n\n{SURROUNDING[1]}\n"
 
 
-def flat_page(result, manifests, page, phone, seed=0):
-    flattened = flatten(phone(page, seed=seed), manifests)[0]
-    return enhance(flattened.image, "flatten"), flattened
+# -- pulling requests out of a transcript -----------------------------------
 
 
-# -- finding the box --------------------------------------------------------
+def test_a_boxed_request_becomes_a_call():
+    (found,) = find_calls(transcript(), REF)
+    assert found.call.tool == "research-request"
+    assert found.call.prompt == "books on the black plague"
+    assert found.style == "box"
+    assert found.understood
 
 
-def test_a_drawn_box_is_found_on_a_ruled_page(rendered, phone):
-    """The concern that prompted this: a pen box on top of printed ruling.
-
-    It works because they differ in *thickness*, not darkness -- printed ruling
-    is a fraction of a millimetre and a pen line is several times that, so an
-    erosion sized between them keeps one and drops the other. Tone would not do
-    it: flattening pushes faint ruling to white in places and leaves it grey in
-    others.
-    """
-    result, manifests, page = rendered
-    written, truth = boxed_page(page, phone)
-    flat, _ = flat_page(result, manifests, written, phone)
-
-    boxes = find_boxes(flat)
-    assert len(boxes) == 1, [b for b in boxes]
-    box = boxes[0]
-    # Within a couple of millimetres of where it was drawn.
-    assert abs(box.x - truth[0]) < 30 and abs(box.y - truth[1]) < 30
-    assert abs(box.width - truth[2]) < 60 and abs(box.height - truth[3]) < 60
+def test_a_typed_marker_works_too():
+    """For when a box is inconvenient, or the transcriber missed one."""
+    (found,) = find_calls(transcript(fenced=False), REF)
+    assert found.call.tool == "research-request"
+    assert found.call.prompt == "books on the black plague"
+    assert found.style == "typed"
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2, 3])
-def test_the_box_survives_being_photographed(rendered, phone, seed):
-    result, manifests, page = rendered
-    written, _ = boxed_page(page, phone, seed=seed)
-    flat, _ = flat_page(result, manifests, written, phone, seed=seed)
-    assert len(find_boxes(flat)) == 1
+def test_a_forgotten_END_still_closes_the_request():
+    """The obvious mistake to make. A blank line is what a reader would assume."""
+    text = "prose\n\nTOOL research-request\nbooks on the plague\n\nmore prose\n"
+    (found,) = find_calls(text, REF)
+    assert found.call.prompt == "books on the plague"
+    assert "more prose" not in found.call.prompt
 
 
-def test_a_page_with_no_box_finds_nothing(rendered, phone):
-    """The failure that would cost real money: inventing a request."""
-    result, manifests, page = rendered
-    import numpy
-
-    written = numpy.array(page, copy=True)
-    for row in range(18):
-        write(written, 240, 330 + row * 84, "the quick brown fox jumps over the lazy dog")
-    flat, _ = flat_page(result, manifests, written, phone)
-    assert find_boxes(flat) == []
+def test_the_surrounding_prose_is_not_part_of_the_request():
+    (found,) = find_calls(transcript(), REF)
+    for phrase in SURROUNDING:
+        assert phrase not in found.call.prompt
 
 
-def test_underlines_and_margin_rules_are_not_boxes(rendered, phone):
-    """Both are thick pen strokes, so thickness alone would accept them.
-
-    They are rejected for not enclosing anything, which is the second half of
-    the test and the reason it is not just an erosion.
-    """
-    import cv2
-    import numpy
-
-    result, manifests, page = rendered
-    written = numpy.array(page, copy=True)
-    write(written, 240, 400, "a heavily underlined heading")
-    cv2.line(written, (240, 430), (1400, 435), 20, 6)
-    cv2.line(written, (200, 600), (200, 1100), 20, 6)  # margin rule
-    flat, _ = flat_page(result, manifests, written, phone)
-    assert find_boxes(flat) == []
+def test_a_page_with_no_request_yields_none():
+    assert find_calls("Just some ordinary writing.\n\nAnd more of it.\n", REF) == []
 
 
-def test_the_corner_codes_are_never_boxes(rendered, phone):
-    """A QR code is a rectangle of ink in a corner, which is the shape being
-    looked for. Geometry from the manifest excludes them outright."""
-    from paperlog.capture import PageGeometry
-
-    result, manifests, page = rendered
-    written, _ = boxed_page(page, phone)
-    flat, _ = flat_page(result, manifests, written, phone)
-    geometry = PageGeometry.from_manifest(manifests["K7M2QX"])
-
-    with_geometry = find_boxes(flat, geometry=geometry)
-    assert len(with_geometry) == 1
-    for box in with_geometry:
-        assert box.width < flat.shape[1] * 0.9
+def test_a_multi_line_request_keeps_its_shape():
+    text = "```paperlog-tool interactive-break\ndouble pendulum viz\nsliders for angles\n```"
+    (found,) = find_calls(text, REF)
+    assert found.call.prompt == "double pendulum viz\nsliders for angles"
 
 
-def test_two_boxes_come_back_in_reading_order(rendered, phone):
-    import numpy
+def test_two_requests_come_back_in_reading_order():
+    text = (
+        "```paperlog-tool research-request\nfirst\n```\n\n"
+        "some prose\n\n"
+        "```paperlog-tool interactive-break\nsecond\n```\n"
+    )
+    first, second = find_calls(text, REF)
+    assert (first.call.tool, first.call.ordinal) == ("research-request", 0)
+    assert (second.call.tool, second.call.ordinal) == ("interactive-break", 1)
 
-    result, manifests, page = rendered
-    written = numpy.array(page, copy=True)
-    draw_box(written, 250, 1400, 1180, 260, seed=1)
-    write(written, 300, 1500, "TOOL research-request", scale=0.85)
-    draw_box(written, 250, 430, 1180, 260, seed=2)
-    write(written, 300, 540, "TOOL interactive-break", scale=0.85)
-    flat, _ = flat_page(result, manifests, written, phone)
 
-    boxes = find_boxes(flat)
-    assert len(boxes) == 2
-    assert boxes[0].y < boxes[1].y  # the upper one first
+def test_a_box_with_no_tool_name_is_reported_not_guessed():
+    """The writer clearly asked for something; they just did not say what."""
+    (found,) = find_calls("```paperlog-tool\nsomething I forgot to label\n```", REF)
+    assert found.call.tool == UNKNOWN_TOOL
+    assert not found.understood
+    assert found.call.prompt == "something I forgot to label"
+
+
+def test_a_tool_word_transcribed_into_the_fence_is_tolerated():
+    """The writer heads the box 'TOOL research-request'; the transcriber may
+    carry that word into the info string as well as the body."""
+    (found,) = find_calls("```paperlog-tool TOOL research-request\nbody\n```", REF)
+    assert found.call.tool == "research-request"
+
+
+def test_a_tilde_fence_is_accepted():
+    (found,) = find_calls("~~~paperlog-tool research-request\nbody\n~~~", REF)
+    assert found.call.tool == "research-request"
+
+
+def test_a_typed_marker_inside_a_box_is_one_request_not_two():
+    text = "```paperlog-tool research-request\nTOOL research-request\nbody\n```"
+    assert len(find_calls(text, REF)) == 1
+
+
+def test_an_ordinary_code_block_is_not_a_request():
+    """Someone writing about code should not accidentally spend money."""
+    assert find_calls("```python\nprint('hello')\n```", REF) == []
+
+
+def test_the_prose_can_be_recovered_without_the_requests():
+    """What a draft needs: the writing, without the machinery of asking."""
+    prose = strip_calls(transcript())
+    assert SURROUNDING[0] in prose and SURROUNDING[1] in prose
+    assert "paperlog-tool" not in prose and "black plague" not in prose
+
+    typed = strip_calls(transcript(fenced=False))
+    assert "TOOL" not in typed and "END" not in typed
+    assert SURROUNDING[1] in typed
+
+
 
 
 # -- the isolation guarantee ------------------------------------------------
-
-
-def test_the_crop_contains_the_box_and_nothing_around_it(rendered, phone):
-    """The load-bearing test for the whole design.
-
-    Cropping is what makes isolation a fact rather than an instruction: the
-    surrounding prose is not redacted or ignored, it is simply not present in
-    the pixels that get sent. This checks the rows above and below the box are
-    genuinely gone, which is what stops a request from being tailored to
-    writing the author never submitted.
-    """
-    result, manifests, page = rendered
-    written, _ = boxed_page(page, phone)
-    flat, _ = flat_page(result, manifests, written, phone)
-
-    box = find_boxes(flat)[0]
-    region = crop(flat, box)
-    assert region.shape[0] == box.height and region.shape[1] == box.width
-
-    # The prose sits above and below the box on the full page; the crop starts
-    # at the box and ends at it, so none of those rows can be inside it.
-    assert box.y > 0 and box.y + box.height < flat.shape[0]
-    above = flat[: box.y - 5]
-    below = flat[box.y + box.height + 5 :]
-    assert (above < 200).sum() > 0, "the fixture should have ink above the box"
-    assert (below < 200).sum() > 0, "the fixture should have ink below the box"
-    # Nothing was padded outward: the crop is exactly the rectangle.
-    assert region.shape == (box.height, box.width)
-
-
-def test_a_dispatched_request_carries_the_prompt_and_nothing_else():
-    """What the tool actually receives.
-
-    Even a well-cropped image is worth nothing if the dispatch then helpfully
-    attaches the page for context, so this checks the far end of the pipe too.
-    """
-    call = ToolCall(
-        tool="research-request",
-        prompt="books on the black plague, primary sources",
-        notebook="K7M2QX",
-        page=1,
-    )
-    backend = RecordingBackend()
-    run_call(call, BUILTIN_TOOLS["research-request"], backend=backend)
-
-    (sent,) = backend.calls
-    assert sent["images"] == 0, "the page must not travel with the request"
-    body = sent["instruction"]
-    assert "black plague" in body
-    for phrase in SURROUNDING:
-        assert phrase not in body
-    assert "K7M2QX" not in body, "not even which notebook it came from"
-    assert "page" not in body.lower().replace("plague", "")
 
 
 class RecordingBackend:
@@ -288,96 +181,48 @@ class RecordingBackend:
         return self._Reply(text=reply, input_tokens=100, output_tokens=20)
 
     def read(self, *, media_type, data, system, instruction):
-        self.calls.append(
-            {"images": 1, "system": system, "instruction": instruction, "data": data}
-        )
-        return self._next("TOOL: research-request\nPROMPT:\nbooks on the black plague")
+        self.calls.append({"images": 1, "system": system, "instruction": instruction})
+        return self._next("transcribed page")
 
     def ask(self, *, system, instruction):
-        self.calls.append(
-            {"images": 0, "system": system, "instruction": instruction, "data": ""}
-        )
+        self.calls.append({"images": 0, "system": system, "instruction": instruction})
         return self._next("# A report\n\nBody.")
 
     def preflight(self):
         return None
 
 
-def test_extraction_sends_only_the_cropped_region(rendered, phone):
-    import base64
-    import io
+def test_a_dispatched_request_carries_the_prompt_and_nothing_else():
+    """The load-bearing test for the whole design.
 
-    from PIL import Image
-
-    result, manifests, page = rendered
-    written, truth = boxed_page(page, phone)
-    flat, flattened = flat_page(result, manifests, written, phone)
-
+    Everything upstream is arrangement; this is the check that what actually
+    goes on the wire to the model answering the request is the request. The
+    page it came from does not travel with it, the prose around it does not,
+    and neither does which notebook it was written in.
+    """
+    (found,) = find_calls(transcript(), REF)
     backend = RecordingBackend()
-    found = extract_from_page(flat, flattened.ref, backend=backend)
-    assert len(found) == 1
-    box = found[0].box
+    run_call(found.call, BUILTIN_TOOLS["research-request"], backend=backend)
 
     (sent,) = backend.calls
-    sent_image = Image.open(io.BytesIO(base64.standard_b64decode(sent["data"])))
-
-    # What went on the wire is the box, exactly -- not the page, and not the
-    # box with a helpful margin of context around it.
-    assert sent_image.size == (box.width, box.height)
-    assert sent_image.height < flat.shape[0] * 0.5
-    # And the box is the one that was drawn, give or take the few pixels the
-    # dilation adds while closing the wobble.
-    assert sent_image.width == pytest.approx(truth[2], rel=0.1)
-    assert sent_image.height == pytest.approx(truth[3], rel=0.15)
+    assert sent["images"] == 0, "the page must not travel with the request"
+    body = sent["instruction"]
+    assert "black plague" in body
+    for phrase in SURROUNDING:
+        assert phrase not in body
+    assert "K7M2QX" not in body, "not even which notebook it came from"
 
 
-# -- reading what came back -------------------------------------------------
+def test_no_model_both_reads_the_page_and_chooses_the_request():
+    """The division of labour that makes isolation structural.
 
-
-def test_a_well_formed_reply_parses():
-    tool, prompt = parse_reply(
-        "TOOL: research-request\nPROMPT:\nbooks on the black plague\nprimary sources?"
-    )
-    assert tool == "research-request"
-    assert prompt == "books on the black plague\nprimary sources?"
-
-
-def test_parsing_tolerates_case_and_stray_preamble():
-    """A model that adds a line has not made a page-losing mistake."""
-    tool, prompt = parse_reply(
-        "Here is the transcription:\n\ntool: interactive-break\nprompt:\ndouble pendulum"
-    )
-    assert tool == "interactive-break"
-    assert prompt == "double pendulum"
-
-
-def test_a_missing_tool_name_is_reported_not_guessed():
-    tool, prompt = parse_reply("PROMPT:\nsomething I forgot to label")
-    assert tool == UNKNOWN_TOOL
-    assert prompt == "something I forgot to label"
-
-
-def test_a_model_that_answers_instead_of_copying_does_not_become_a_prompt():
-    """The failure this format is chosen to make visible.
-
-    The box contains an imperative sentence and it is being shown to a language
-    model, so 'it did the task instead of copying it' is the thing that can go
-    wrong. It surfaces as a tool name that matches nothing, which the caller
-    reports rather than runs.
+    Extraction takes text and returns calls with no model in the loop at all,
+    so there is no step where a model can see the surrounding prose *and*
+    decide what was asked. Calling it with no backend, no key and no network is
+    the proof.
     """
-    tool, prompt = parse_reply(
-        "Certainly! Here is a double pendulum visualisation:\n\n<html>...</html>"
-    )
-    assert tool == UNKNOWN_TOOL
-
-
-def test_an_empty_box_yields_nothing_runnable(rendered, phone):
-    result, manifests, page = rendered
-    written, _ = boxed_page(page, phone)
-    flat, flattened = flat_page(result, manifests, written, phone)
-    backend = RecordingBackend(replies=["TOOL: ?\nPROMPT:\n"])
-    (extraction,) = extract_from_page(flat, flattened.ref, backend=backend)
-    assert not extraction.understood
+    calls = find_calls(transcript(), REF)
+    assert len(calls) == 1 and calls[0].call.prompt == "books on the black plague"
 
 
 # -- identity and the ledger ------------------------------------------------

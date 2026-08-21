@@ -32,6 +32,9 @@ from .imposition import padded_count
 from .units import MM, UnitError
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".tif", ".tiff", ".webp", ".bmp"}
+#: What `paperlog transcribe -d` writes. Reading one of these costs nothing,
+#: so it is always preferred over re-reading the image it came from.
+TRANSCRIPT_SUFFIXES = {".md", ".markdown", ".txt"}
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     "a5-ruled": {
@@ -562,11 +565,15 @@ def _writing_of(manifests: Dict[str, Any], notebook: str) -> Dict[str, Any]:
 
 
 def command_calls(args: argparse.Namespace) -> int:
-    """Find boxed requests on scanned pages and record them."""
+    """Find the requests boxed on the page, from transcripts."""
     from .calls import Ledger
-    from .capture import BackendMissing, CaptureError, load_manifests, read_image
-    from .extract import ExtractError, extract_from_page
-    from .transcribe import PAGE_FILENAME, load_transcribe_config
+    from .extract import find_calls
+    from .transcribe import (
+        PAGE_FILENAME,
+        TranscribeError,
+        load_transcribe_config,
+        transcribe_page,
+    )
     from .vision import backend_for
 
     ledger = Ledger(args.ledger) if args.ledger else Ledger.default()
@@ -584,76 +591,83 @@ def command_calls(args: argparse.Namespace) -> int:
             print(f"{record.id}  {record.status:8s} {record.tool:20s} {where:14s} {first[:60]}")
         return 0
 
-    pages: List[Path] = []
+    inputs: List[Path] = []
     for entry in args.pages:
-        pages.extend(
-            sorted(p for p in entry.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
-            if entry.is_dir()
-            else [entry]
-        )
-    if not pages:
-        print("error: no page images given", file=sys.stderr)
+        if entry.is_dir():
+            inputs.extend(
+                sorted(
+                    p
+                    for p in entry.iterdir()
+                    if p.suffix.lower() in IMAGE_SUFFIXES | TRANSCRIPT_SUFFIXES
+                )
+            )
+        else:
+            inputs.append(entry)
+    if not inputs:
+        print("error: no transcripts or page images given", file=sys.stderr)
         return 1
 
-    from .library import load as load_library
+    # Prefer a transcript over the image it came from: the page has already
+    # been read once, and reading it again costs money to learn nothing new.
+    by_stem: Dict[str, Path] = {}
+    for path in inputs:
+        current = by_stem.get(path.stem)
+        if current is None or (
+            current.suffix.lower() in IMAGE_SUFFIXES
+            and path.suffix.lower() in TRANSCRIPT_SUFFIXES
+        ):
+            by_stem[path.stem] = path
 
-    try:
-        manifests = dict(load_library()) if not args.no_library else {}
-        if args.manifest:
-            manifests.update(load_manifests(args.manifest))
-        config = load_transcribe_config(args.config, transcribe_overrides(args))
-    except (CaptureError, BackendMissing, TranscribeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-
-    backend = backend_for(config.vision)
-    preflight = getattr(backend, "preflight", None)
-    if preflight is not None:
-        try:
-            preflight()
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-    from .capture import PageGeometry
-
-    seen, skipped, failed = [], 0, 0
+    config = None
+    backend = None
+    seen, skipped, failed, unnamed = [], 0, 0, 0
     known = ledger.by_id()
-    for path in pages:
+
+    for stem in sorted(by_stem):
+        path = by_stem[stem]
         match = PAGE_FILENAME.match(path.stem)
         if match is None:
             print(f"  skipped {path.name}: filename does not name a page", file=sys.stderr)
             continue
         ref = decode_page_name(match)
-        geometry = None
-        manifest = manifests.get(ref.notebook.upper())
-        if manifest:
-            try:
-                geometry = PageGeometry.from_manifest(manifest)
-            except Exception:
-                geometry = None
-        try:
-            image = read_image(path)
-            found = extract_from_page(
-                image, ref, geometry=geometry, dpi=args.dpi, backend=backend
-            )
-        except (ExtractError, CaptureError, BackendMissing) as exc:
-            print(f"  failed  {path.name}: {exc}", file=sys.stderr)
-            failed += 1
-            continue
 
-        for extraction in found:
+        if path.suffix.lower() in TRANSCRIPT_SUFFIXES:
+            text = path.read_text(encoding="utf-8")
+        else:
+            # Only pay for a vision model if there is no transcript to read.
+            if config is None:
+                try:
+                    config = load_transcribe_config(args.config, transcribe_overrides(args))
+                    backend = backend_for(config.vision)
+                    preflight = getattr(backend, "preflight", None)
+                    if preflight is not None:
+                        preflight()
+                except Exception as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 1
+            try:
+                text = transcribe_page(path, config, backend=backend).text
+            except (TranscribeError, Exception) as exc:
+                print(f"  failed  {path.name}: {exc}", file=sys.stderr)
+                failed += 1
+                continue
+
+        for extraction in find_calls(text, ref):
             call = extraction.call
             if call.id in known:
                 skipped += 1
                 continue
+            if not extraction.understood:
+                unnamed += 1
             first = call.prompt.splitlines()[0] if call.prompt else "(empty)"
-            flag = "" if extraction.understood else "   <- no tool name found"
+            flag = "" if extraction.understood else "   <- no tool name; name it and rescan"
             print(f"  {call.origin}  {call.tool}: {first[:60]}{flag}")
             seen.append(call)
 
     added = ledger.note_seen(seen)
     print(f"found     {len(added)} new call(s), {skipped} already known, {failed} page(s) failed")
+    if unnamed:
+        print(f"unnamed   {unnamed} request(s) have no tool name and will not run", file=sys.stderr)
     if added:
         print(f"ledger    {ledger.path}")
     return 1 if failed and not added else 0
@@ -949,13 +963,15 @@ def build_parser() -> argparse.ArgumentParser:
     calls_cmd = subparsers.add_parser(
         "calls",
         help="find the requests you boxed on the page",
-        description="Detects hand-drawn boxes on scanned pages and reads each one "
-                    "in isolation -- the box is cropped out before any model sees "
-                    "it, so the writing around it cannot colour the request. "
+        description="Pulls the requests you boxed out of a page's transcript. The "
+                    "box is recognised while the page is transcribed; selecting the "
+                    "request from the transcript is a plain pattern match, so no "
+                    "model both sees your prose and decides what you asked for. "
                     "Repeats are recognised, so rescanning a page is free.",
     )
     calls_cmd.add_argument("pages", nargs="*", type=Path,
-                           help="page images or directories, as written by `scan`")
+                           help="transcripts or page images (a transcript is used in "
+                                "preference, since the page has already been read)")
     calls_cmd.add_argument("-l", "--list", action="store_true", help="list recorded calls")
     calls_cmd.add_argument("--pending", action="store_true", help="with --list, only unrun")
     calls_cmd.add_argument("--ledger", type=Path, help="ledger file (default: $PAPERLOG_HOME/calls.jsonl)")

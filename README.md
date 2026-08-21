@@ -29,6 +29,7 @@ pip install -e .                 # making journals
 pip install -e '.[verify]'       # + `paperlog scan` and `paperlog verify`
 pip install -e '.[verify,heic]'  # + iPhone HEIC photographs
 pip install -e '.[transcribe]'   # + `paperlog transcribe`, handwriting to text
+pip install -e '.[gemini]'       # + Gemini as the reader instead
 pip install -e '.[dev]'          # + the test suite
 ```
 
@@ -99,7 +100,7 @@ paperlog transcribe pages/K7M2QX/ -o notebook.md
 #    -> notebook.md, one section per page, in reading order
 
 # 6. optional: run the requests you boxed on the page
-paperlog calls pages/K7M2QX/                   # find them
+paperlog calls text/                           # find them in the transcripts
 paperlog run                                   # answer them, overnight
 #    -> reports and widgets, filed where the notebook says
 ```
@@ -193,8 +194,19 @@ recognise it falls back to the smaller tier and says so on stderr; `max_edge` /
 `max_pixels` override it.
 
 Everything that names a vendor lives in one module (`paperlog/vision.py`)
-behind a `read(image) -> Reply` seam, so a second provider is a class there
-rather than a change to transcription. Anthropic is what ships.
+behind a `read(image) -> Reply` seam. Two providers ship — `anthropic` and
+`gemini` — and switching is a config line:
+
+```yaml
+vision:
+  provider: gemini
+  model: gemini-3-pro
+```
+
+The key variable follows the provider (`GEMINI_API_KEY`) unless you name one
+yourself. Handwriting is exactly the place a second opinion earns its keep: the
+models differ enough on cursive that the right choice is something to measure on
+your own hand rather than inherit from a benchmark.
 
 **Why a vision model and not an OCR engine.** Dedicated handwriting recognition
 — Tesseract, TrOCR, the cloud OCR APIs — is trained on line images with a known
@@ -245,9 +257,25 @@ notebook says.
   The interesting thing about this is...
 ```
 
+`paperlog transcribe` returns the boxed region as a fenced block, so the
+transcript reads:
+
+````markdown
+This is a test of the double pendulum
+
+```paperlog-tool interactive-break
+double pendulum viz, sliders for the angles and relative masses,
+click-drag to throw it around
+```
+
+The interesting thing about this is...
+````
+
+Then:
+
 ```console
-$ paperlog calls pages/PAPER1/          # find them
-  PAPER1-p0001F#0  interactive-break: double pendulum viz, sliders for
+$ paperlog calls text/                  # a regex over the transcripts
+  K7M2QX-p0001F#0  interactive-break: double pendulum viz, sliders for
 found     1 new call(s), 0 already known, 0 page(s) failed
 
 $ paperlog run --dry-run                # check before spending
@@ -258,57 +286,78 @@ $ paperlog run                          # overnight
 
 Two tools ship: `interactive-break` writes a self-contained HTML widget to embed
 in a post, and `research-request` writes a Markdown report with sources.
-`paperlog run --list-tools` lists them.
+`paperlog run --list-tools` lists them. If a box is inconvenient, a typed marker
+works too:
 
-### Why a drawn box
+```
+TOOL research-request
+books on the black plague, primary sources?
+END
+```
 
-A box is the cheapest mark a hand can make without breaking flow — no counting
-brackets, no spelling a keyword, no way to get it half right. That matters more
-than it sounds: the whole point of writing a request on paper is that it costs
-you nothing mid-thought, and any syntax fiddly enough to interrupt you defeats
-the exercise.
+### Who reads what
 
-It also turns out to be the most reliable thing to detect. Pen and printed ruling
-differ in *thickness* — the ruling is a fraction of a millimetre, a pen line
-several times that — so an erosion sized between them keeps one and drops the
-other. Tone would not work, because flattening pushes faint ruling to white in
-some places and leaves it grey in others. Underlines and margin rules survive
-the thickness test and are then rejected for not enclosing anything.
+The design constraint is that **no model both sees your prose and decides what
+you asked for.** If one did, the paragraph around a request would start shaping
+the request, and authorial control would slide quietly from you to the machine.
 
-### The request goes on alone
+So the work is split, and the split is what makes it a guarantee rather than a
+promise:
 
-**Nothing around the box reaches the model.** The box is cropped out of the page
-before anything reads it, and the crop is exactly the rectangle — never padded
-outward, because every pixel of padding is a chance for the line above to come
-along. Then the extracted prompt is dispatched by itself: no page, no
+| step | sees | does |
+|---|---|---|
+| transcribe | the whole page | copies it out, verbatim |
+| extract | text only | pattern match — **no model at all** |
+| run | the request alone | answers it |
+
+The tool that answers gets the fenced text and nothing else: no page, no
 surrounding prose, not even which notebook it came from.
 
-That is deliberate and it is the constraint the design is built around. A model
-that can see the paragraph around a request will tailor the request to fit it,
-and then the writing has quietly started steering the tool instead of the other
-way round. Two model calls rather than one, and a crop rather than a prompt
-instruction, are what make it a guarantee instead of a hope. If you *want*
-context, write it inside the box.
+The residual risk, stated rather than buried: the transcriber could let context
+colour how it reads a word *inside* the box. That is far weaker than tailoring a
+request, and the prompt is explicit about copying verbatim — but it is not
+nothing, and it is the price of reading the box in the same pass as the page.
+
+### Why the box is recognised by the transcriber
+
+An earlier version detected the box with image processing — erode away the thin
+printed ruling, keep the thick pen, find the rectangle. It worked beautifully on
+synthetic pages and would have failed on yours. Measured against pen strokes
+with realistic variation:
+
+| pen | ink | skips | found |
+|---|---|---|---|
+| 0.68mm | near-black | none | 6/6 |
+| 0.25mm | near-black | none | 6/6 |
+| 0.34mm | mid-grey | none | **0/6** |
+| 0.25mm | grey | 5% | **0/6** |
+
+Contour-finding needs a closed loop of dark pixels. Real pen photographed under
+room light has grey stretches and skips, and one gap in the loop is enough. A
+vision model has no such trouble — it sees a faint, broken, wobbly box the way
+you do. So the box is recognised by the thing that is good at recognising boxes,
+and everything after that is text.
 
 ### Written once, run once
 
-Rescanning a page is free. Every call carries an id derived from where it came
-from and what it asks, so photographing the same page again — which `scan`
-encourages, since it prefers a better shot — recognises the request instead of
-running it twice. The prompt is normalised before hashing, so a transcription
-that differs by a comma is the same call while a genuine rewrite is a new one.
+Rescanning is free. Every call carries an id derived from where it came from and
+what it asks, so photographing a page again — which `scan` encourages, since it
+prefers a better shot — recognises the request instead of running it twice. The
+prompt is normalised before hashing, so a transcription differing by a comma is
+the same call while a rewrite is a new one.
 
-The ledger at `$PAPERLOG_HOME/calls.jsonl` records what is outstanding, what
-ran, and where the output went. `paperlog calls --list` reads it back;
-`paperlog run --retry` picks up what failed.
+`paperlog calls` prefers an existing transcript over the image it came from, so
+finding requests on already-transcribed pages costs nothing. The ledger at
+`$PAPERLOG_HOME/calls.jsonl` records what is outstanding and where output went;
+`--list` reads it back, `paperlog run --retry` picks up failures.
 
 ### Because you are not there when it runs
 
-These run hours after you put the pen down, and there is no way to ask you a
-follow-up. Every tool contract therefore tells the model to decide rather than
+These run hours after you put the pen down, and nobody can answer a follow-up
+question. Every tool contract therefore tells the model to decide rather than
 ask: pick the reading a careful colleague would pick, say at the top what it
-took the request to mean, and do the work. A tool that stops to ask a question
-has wasted the run.
+took the request to mean, and do the work. A tool that stops to ask has wasted
+the run.
 
 ### Per notebook, not per page
 

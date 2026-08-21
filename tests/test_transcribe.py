@@ -623,3 +623,112 @@ def test_cost_uses_the_model_that_actually_ran(pages, tmp_path, capsys, monkeypa
     assert code == 0
     # 3000 in / 300 out at Haiku's $1/$5 = $0.0045, not Opus's $0.0225.
     assert "$0.00" in stdout
+
+
+# -- a second provider ------------------------------------------------------
+
+
+class FakePart:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class FakeGeminiModels:
+    """Stands in for client.models, recording the request it was handed."""
+
+    def __init__(self, text="page text", finish="STOP"):
+        self.calls = []
+        self._text = text
+        self._finish = finish
+
+    def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        reason = type("Reason", (), {"name": self._finish})()
+        candidate = type("Candidate", (), {"finish_reason": reason})()
+        usage = type("Usage", (), {"prompt_token_count": 1200, "candidates_token_count": 90})()
+        return type(
+            "Response",
+            (),
+            {
+                "text": self._text,
+                "candidates": [candidate],
+                "usage_metadata": usage,
+                "model_version": model,
+            },
+        )()
+
+
+class FakeGeminiClient:
+    def __init__(self, text="page text", finish="STOP"):
+        self.models = FakeGeminiModels(text, finish)
+
+
+def gemini(**kwargs):
+    from paperlog.vision import GeminiBackend
+
+    spec = VisionSpec(provider="gemini", model=kwargs.pop("model", "gemini-3-pro"), **kwargs)
+    client = FakeGeminiClient()
+    return GeminiBackend(spec, client=client), client
+
+
+def test_a_second_provider_slots_in_behind_the_same_seam(page):
+    """The point of the seam: transcription does not know who answered."""
+    backend, client = gemini()
+    result = transcribe_page(page, cfg(), backend=backend)
+    assert result.text == "page text"
+    assert result.input_tokens == 1200 and result.output_tokens == 90
+    assert len(client.models.calls) == 1
+
+
+def test_the_gemini_request_carries_the_system_prompt_and_the_image(page):
+    backend, client = gemini()
+    transcribe_page(page, cfg(), backend=backend)
+
+    (call,) = client.models.calls
+    assert call["model"] == "gemini-3-pro"
+    assert call["config"].system_instruction == DEFAULT_SYSTEM_PROMPT
+    # An image part and a text part, in that order.
+    assert len(call["contents"]) == 2
+    assert call["contents"][0].inline_data is not None
+    assert call["contents"][1].text.startswith("Transcribe the handwriting")
+
+
+def test_a_gemini_safety_stop_reads_as_a_refusal(page):
+    """Gemini reports it as a finish reason on the candidate rather than a stop
+    reason on the message; the rest of paper-log should not have to know."""
+    from paperlog.vision import GeminiBackend
+
+    spec = VisionSpec(provider="gemini", model="gemini-3-pro")
+    backend = GeminiBackend(spec, client=FakeGeminiClient(text="", finish="SAFETY"))
+    with pytest.raises(TranscribeError, match="declined"):
+        transcribe_page(page, cfg(), backend=backend)
+
+
+def test_running_out_of_budget_reads_the_same_on_either_provider(page):
+    from paperlog.vision import GeminiBackend
+
+    spec = VisionSpec(provider="gemini", model="gemini-3-pro")
+    backend = GeminiBackend(spec, client=FakeGeminiClient(text="", finish="MAX_TOKENS"))
+    with pytest.raises(TranscribeError, match="output budget"):
+        transcribe_page(page, cfg(), backend=backend)
+
+
+def test_the_key_variable_follows_the_provider():
+    """Switching provider should not send you hunting for a key under the
+    other vendor's name -- but an explicit choice is always kept."""
+    assert VisionSpec().api_key_env == "ANTHROPIC_API_KEY"
+    assert VisionSpec(provider="gemini").api_key_env == "GEMINI_API_KEY"
+    assert VisionSpec(provider="gemini", api_key_env="WORK_KEY").api_key_env == "WORK_KEY"
+
+
+def test_an_unknown_provider_is_rejected_with_the_list():
+    with pytest.raises(VisionError, match="anthropic, gemini"):
+        VisionSpec(provider="openai")
+
+
+def test_the_provider_is_selectable_from_config(tmp_path):
+    path = tmp_path / "t.yaml"
+    path.write_text("vision:\n  provider: gemini\n  model: gemini-3-pro\n")
+    config = load_transcribe_config(path)
+    assert config.vision.provider == "gemini"
+    assert config.vision.api_key_env == "GEMINI_API_KEY"

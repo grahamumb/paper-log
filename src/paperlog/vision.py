@@ -51,6 +51,11 @@ MODEL_LIMITS: Dict[str, Tuple[int, int]] = {
     "claude-opus-4-5": (1568, 1_150_000),
     "claude-sonnet-4-6": (1568, 1_150_000),
     "claude-sonnet-4-5": (1568, 1_150_000),
+    # Gemini. Its own guidance is in tiles rather than a single cap; these are
+    # sizes that pass through without a server-side resize.
+    "gemini-3": (3072, 3_500_000),
+    "gemini-2.5": (3072, 3_500_000),
+    "gemini-2.0": (3072, 3_500_000),
 }
 
 #: Used for a model this file has never heard of. Deliberately the smaller
@@ -71,7 +76,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 #: cover both. A dense handwritten page is well under 2000 tokens of text.
 DEFAULT_MAX_TOKENS = 8000
 
-PROVIDERS = ("anthropic",)
+PROVIDERS = ("anthropic", "gemini")
 
 
 class VisionError(RuntimeError):
@@ -121,11 +126,20 @@ class VisionSpec:
     timeout: float = 300.0
     max_retries: int = 3
 
+    #: Set per provider when it was left at the default, so switching provider
+    #: does not silently look for a key under the other vendor's name.
+    DEFAULT_KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "gemini": "GEMINI_API_KEY"}
+
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS:
             raise VisionError(
                 f"unknown provider {self.provider!r}; built in: {', '.join(PROVIDERS)}"
             )
+        # Left at the field default means "whatever this provider uses". An
+        # explicitly set variable is always kept, so a shared gateway key or a
+        # per-machine name still works.
+        if self.api_key_env == VisionSpec.api_key_env:
+            self.api_key_env = self.DEFAULT_KEY_ENV[self.provider]
         if self.effort not in EFFORTS:
             raise VisionError(
                 f"effort must be one of {', '.join(EFFORTS)}, got {self.effort!r}"
@@ -392,7 +406,113 @@ class AnthropicBackend:
         )
 
 
-BACKENDS = {"anthropic": AnthropicBackend}
+class GeminiBackend:
+    """Reads an image with the Gemini API.
+
+    Here because handwriting is a place where it is worth having a second
+    opinion available: the models differ enough on cursive that the right
+    choice is a thing to measure on your own hand, not to inherit from a
+    benchmark. Swapping is a config line.
+    """
+
+    #: Gemini reports refusals as a finish reason on the candidate rather than
+    #: as a stop reason on the message, so these are mapped onto the same
+    #: `Reply.refused` the rest of paper-log checks.
+    REFUSAL_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"}
+
+    def __init__(self, spec: VisionSpec, client=None):
+        self.spec = spec
+        self._client = client
+
+    @property
+    def limits(self) -> Tuple[int, int]:
+        return self.spec.limits
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
+
+    def preflight(self) -> None:
+        _ = self.client
+
+    def _build_client(self):
+        try:
+            from google import genai
+        except ImportError as exc:  # pragma: no cover - exercised by hand
+            raise VisionError(
+                "the gemini provider needs the google-genai package: "
+                "pip install 'paper-log[gemini]'"
+            ) from exc
+
+        key = os.environ.get(self.spec.api_key_env)
+        if not key:
+            raise VisionError(
+                f"no API key: set {self.spec.api_key_env} in your environment. "
+                "There is deliberately no --api-key flag, because a key on the "
+                "command line ends up in your shell history and in `ps`. Keys "
+                "are at https://aistudio.google.com/apikey"
+            )
+        options: Dict[str, Any] = {"api_key": key}
+        if self.spec.base_url:
+            from google.genai import types as genai_types
+
+            options["http_options"] = genai_types.HttpOptions(base_url=self.spec.base_url)
+        return genai.Client(**options)
+
+    def read(self, *, media_type: str, data: str, system: str, instruction: str) -> Reply:
+        from google.genai import types as genai_types
+
+        return self._send(
+            system,
+            [
+                genai_types.Part.from_bytes(
+                    data=base64.standard_b64decode(data), mime_type=media_type
+                ),
+                genai_types.Part.from_text(text=instruction),
+            ],
+        )
+
+    def ask(self, *, system: str, instruction: str) -> Reply:
+        from google.genai import types as genai_types
+
+        return self._send(system, [genai_types.Part.from_text(text=instruction)])
+
+    def _send(self, system: str, parts) -> Reply:
+        from google.genai import types as genai_types
+
+        response = self.client.models.generate_content(
+            model=self.spec.model,
+            contents=parts,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system,
+                max_output_tokens=self.spec.max_tokens,
+            ),
+        )
+
+        candidates = getattr(response, "candidates", None) or []
+        finish = ""
+        if candidates:
+            reason = getattr(candidates[0], "finish_reason", None)
+            finish = getattr(reason, "name", None) or str(reason or "")
+        stop_reason = "end_turn"
+        if finish in self.REFUSAL_REASONS:
+            stop_reason = "refusal"
+        elif finish == "MAX_TOKENS":
+            stop_reason = "max_tokens"
+
+        usage = getattr(response, "usage_metadata", None)
+        return Reply(
+            text=(getattr(response, "text", None) or "").strip(),
+            stop_reason=stop_reason,
+            input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+            output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+            model=getattr(response, "model_version", "") or self.spec.model,
+        )
+
+
+BACKENDS = {"anthropic": AnthropicBackend, "gemini": GeminiBackend}
 
 
 def backend_for(spec: VisionSpec, client=None):
