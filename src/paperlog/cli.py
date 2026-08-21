@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -22,6 +23,7 @@ from .ids import CORNER_NAMES, TokenError, decode, new_notebook_id
 # Safe to import at module scope: vision.py defers `anthropic` and Pillow until
 # a page is actually read, so `paperlog --help` costs nothing.
 from .transcribe import CONFIG_FILENAME as TRANSCRIBE_CONFIG_NAME
+from .transcribe import TranscribeError
 from .vision import DEFAULT_EFFORT as TRANSCRIBE_EFFORT
 from .vision import DEFAULT_MODEL as TRANSCRIBE_MODEL
 from .vision import EFFORTS as VISION_EFFORTS
@@ -554,6 +556,239 @@ def command_transcribe(args: argparse.Namespace) -> int:
     return 1 if run.failures and not run.transcripts else 0
 
 
+def _writing_of(manifests: Dict[str, Any], notebook: str) -> Dict[str, Any]:
+    entry = manifests.get(notebook.upper()) or {}
+    return entry.get("writing") or {}
+
+
+def command_calls(args: argparse.Namespace) -> int:
+    """Find boxed requests on scanned pages and record them."""
+    from .calls import Ledger
+    from .capture import BackendMissing, CaptureError, load_manifests, read_image
+    from .extract import ExtractError, extract_from_page
+    from .transcribe import PAGE_FILENAME, load_transcribe_config
+    from .vision import backend_for
+
+    ledger = Ledger(args.ledger) if args.ledger else Ledger.default()
+
+    if args.list:
+        records = ledger.records()
+        if args.pending:
+            records = [r for r in records if r.status == "pending"]
+        if not records:
+            print("no calls recorded" if not args.pending else "nothing pending")
+            return 0
+        for record in records:
+            where = f"{record.notebook} p{record.page}{record.side}"
+            first = record.prompt.splitlines()[0] if record.prompt else ""
+            print(f"{record.id}  {record.status:8s} {record.tool:20s} {where:14s} {first[:60]}")
+        return 0
+
+    pages: List[Path] = []
+    for entry in args.pages:
+        pages.extend(
+            sorted(p for p in entry.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+            if entry.is_dir()
+            else [entry]
+        )
+    if not pages:
+        print("error: no page images given", file=sys.stderr)
+        return 1
+
+    from .library import load as load_library
+
+    try:
+        manifests = dict(load_library()) if not args.no_library else {}
+        if args.manifest:
+            manifests.update(load_manifests(args.manifest))
+        config = load_transcribe_config(args.config, transcribe_overrides(args))
+    except (CaptureError, BackendMissing, TranscribeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    backend = backend_for(config.vision)
+    preflight = getattr(backend, "preflight", None)
+    if preflight is not None:
+        try:
+            preflight()
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    from .capture import PageGeometry
+
+    seen, skipped, failed = [], 0, 0
+    known = ledger.by_id()
+    for path in pages:
+        match = PAGE_FILENAME.match(path.stem)
+        if match is None:
+            print(f"  skipped {path.name}: filename does not name a page", file=sys.stderr)
+            continue
+        ref = decode_page_name(match)
+        geometry = None
+        manifest = manifests.get(ref.notebook.upper())
+        if manifest:
+            try:
+                geometry = PageGeometry.from_manifest(manifest)
+            except Exception:
+                geometry = None
+        try:
+            image = read_image(path)
+            found = extract_from_page(
+                image, ref, geometry=geometry, dpi=args.dpi, backend=backend
+            )
+        except (ExtractError, CaptureError, BackendMissing) as exc:
+            print(f"  failed  {path.name}: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+
+        for extraction in found:
+            call = extraction.call
+            if call.id in known:
+                skipped += 1
+                continue
+            first = call.prompt.splitlines()[0] if call.prompt else "(empty)"
+            flag = "" if extraction.understood else "   <- no tool name found"
+            print(f"  {call.origin}  {call.tool}: {first[:60]}{flag}")
+            seen.append(call)
+
+    added = ledger.note_seen(seen)
+    print(f"found     {len(added)} new call(s), {skipped} already known, {failed} page(s) failed")
+    if added:
+        print(f"ledger    {ledger.path}")
+    return 1 if failed and not added else 0
+
+
+def decode_page_name(match) -> Any:
+    from .ids import PageRef
+
+    return PageRef(
+        match.group("notebook"), int(match.group("page")), match.group("side"), "TL"
+    )
+
+
+def command_run(args: argparse.Namespace) -> int:
+    """Run the pending tool calls and file what comes back."""
+    from .calls import DONE, FAILED, Ledger
+    from .capture import load_manifests
+    from .library import home, load as load_library
+    from .tools import ToolError, check_output, destination, load_tools, run_call, strip_fence
+    from .vision import backend_for
+
+    ledger = Ledger(args.ledger) if args.ledger else Ledger.default()
+    try:
+        tools = load_tools()
+    except ToolError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.list_tools:
+        for name, tool in sorted(tools.items()):
+            print(f"{name:20s} {tool.output:9s} {tool.summary}")
+        return 0
+
+    from .transcribe import load_transcribe_config
+
+    try:
+        # Connection settings (endpoint, key variable, provider) come from the
+        # shared config; which model and how hard it thinks come from the tool,
+        # because that is a property of the job rather than of the account.
+        config = load_transcribe_config(args.config, transcribe_overrides(args))
+    except TranscribeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    wanted = ("pending", "failed") if args.retry else ("pending",)
+    pending = [
+        record
+        for record in ledger.records()
+        if record.status in wanted and (args.tool is None or record.tool == args.tool)
+    ]
+    if args.call:
+        pending = [r for r in pending if r.id.startswith(args.call)]
+    if not pending:
+        print("nothing pending" if not args.retry else "nothing pending or failed")
+        return 0
+
+    manifests = dict(load_library()) if not args.no_library else {}
+    if args.manifest:
+        manifests.update(load_manifests(args.manifest))
+
+    ran = failures = 0
+    for record in pending:
+        tool = tools.get(record.tool)
+        if tool is None:
+            print(
+                f"  {record.id}  unknown tool {record.tool!r}; "
+                f"known: {', '.join(sorted(tools))}",
+                file=sys.stderr,
+            )
+            if not args.dry_run:
+                record.status = FAILED
+                record.error = f"unknown tool {record.tool!r}"
+                ledger.append(record)
+            failures += 1
+            continue
+
+        writing = _writing_of(manifests, record.notebook)
+        allowed = writing.get("tools") or []
+        if allowed and record.tool not in allowed:
+            print(
+                f"  {record.id}  {record.tool} is not enabled for notebook "
+                f"{record.notebook} (allowed: {', '.join(allowed)})",
+                file=sys.stderr,
+            )
+            failures += 1
+            continue
+
+        root = Path(args.out_dir) if args.out_dir else Path(
+            writing.get("outputs") or (home() / "outputs")
+        )
+        target = destination(tool, record.call, root)
+
+        if args.dry_run:
+            first = record.prompt.splitlines()[0] if record.prompt else "(empty)"
+            print(f"  would run {record.tool:20s} {record.id}  -> {target}")
+            print(f"            {first[:70]}")
+            continue
+
+        spec = replace(
+            config.vision,
+            model=tool.model,
+            effort=tool.effort,
+            max_tokens=tool.max_tokens,
+        )
+        try:
+            reply = run_call(record.call, tool, backend=backend_for(spec), spec=spec)
+        except Exception as exc:
+            print(f"  failed  {record.id} {record.tool}: {exc}", file=sys.stderr)
+            record.status = FAILED
+            record.error = str(exc)
+            ledger.append(record)
+            failures += 1
+            continue
+
+        text = strip_fence(reply.text) if tool.output == "html" else reply.text
+        for note in check_output(tool, text):
+            print(f"      note: {note}", file=sys.stderr)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text + "\n", encoding="utf-8")
+        record.status = DONE
+        record.output_path = str(target)
+        record.input_tokens = reply.input_tokens
+        record.output_tokens = reply.output_tokens
+        ledger.append(record)
+        print(f"  {record.tool:20s} {record.id} -> {target}")
+        ran += 1
+
+    if args.dry_run:
+        print(f"dry run   {len(pending)} call(s) would run")
+        return 0
+    print(f"ran       {ran} call(s), {failures} failed")
+    return 1 if failures and not ran else 0
+
+
 def command_ui(args: argparse.Namespace) -> int:
     from .webui import serve
 
@@ -710,6 +945,58 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="names and jargon that appear in your notes, to "
                                      "settle ambiguous words")
     transcribe_cmd.set_defaults(func=command_transcribe)
+
+    calls_cmd = subparsers.add_parser(
+        "calls",
+        help="find the requests you boxed on the page",
+        description="Detects hand-drawn boxes on scanned pages and reads each one "
+                    "in isolation -- the box is cropped out before any model sees "
+                    "it, so the writing around it cannot colour the request. "
+                    "Repeats are recognised, so rescanning a page is free.",
+    )
+    calls_cmd.add_argument("pages", nargs="*", type=Path,
+                           help="page images or directories, as written by `scan`")
+    calls_cmd.add_argument("-l", "--list", action="store_true", help="list recorded calls")
+    calls_cmd.add_argument("--pending", action="store_true", help="with --list, only unrun")
+    calls_cmd.add_argument("--ledger", type=Path, help="ledger file (default: $PAPERLOG_HOME/calls.jsonl)")
+    calls_cmd.add_argument("-m", "--manifest", type=Path, action="append")
+    calls_cmd.add_argument("--dpi", type=int, default=300)
+    calls_cmd.add_argument("--no-library", action="store_true")
+    calls_cmd.add_argument("-c", "--config", type=Path)
+    calls_cmd.add_argument("--model")
+    calls_cmd.add_argument("--effort", choices=VISION_EFFORTS)
+    calls_cmd.add_argument("--base-url")
+    calls_cmd.add_argument("--api-key-env", metavar="VAR")
+    calls_cmd.set_defaults(func=command_calls, provider=None, max_edge=None,
+                           max_pixels=None, max_tokens=None, prompt=None, context=None)
+
+    run_cmd = subparsers.add_parser(
+        "run",
+        help="run the pending tool calls and file the answers",
+        description="Each call is sent on its own, carrying the writer's prompt "
+                    "and nothing else -- no page, no surrounding prose, no other "
+                    "calls. Output lands in the folder the notebook was built with.",
+    )
+    run_cmd.add_argument("--tool", help="only this tool")
+    run_cmd.add_argument("--call", metavar="ID", help="only this call (id prefix)")
+    run_cmd.add_argument("-n", "--dry-run", action="store_true",
+                         help="show what would run, and where it would land")
+    run_cmd.add_argument("--list-tools", action="store_true", help="list known tools")
+    run_cmd.add_argument("-o", "--out-dir", type=Path,
+                         help="override the notebook's configured destination")
+    run_cmd.add_argument("--retry", action="store_true",
+                         help="also re-run calls that failed last time")
+    run_cmd.add_argument("--ledger", type=Path)
+    run_cmd.add_argument("-m", "--manifest", type=Path, action="append")
+    run_cmd.add_argument("--no-library", action="store_true")
+    run_cmd.add_argument("-c", "--config", type=Path,
+                         help="connection settings (default: "
+                              f"$PAPERLOG_HOME/{TRANSCRIBE_CONFIG_NAME})")
+    run_cmd.add_argument("--base-url", help="point at a gateway, proxy or stub")
+    run_cmd.add_argument("--api-key-env", metavar="VAR")
+    run_cmd.set_defaults(func=command_run, provider=None, model=None, effort=None,
+                         max_edge=None, max_pixels=None, max_tokens=None,
+                         prompt=None, context=None)
 
     ui_cmd = subparsers.add_parser("ui", help="design a notebook in the browser, with a live preview")
     ui_cmd.add_argument("--port", type=int, default=8765)

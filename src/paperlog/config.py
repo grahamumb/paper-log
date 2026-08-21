@@ -410,6 +410,40 @@ def _parse_corners(value: Any, name: str) -> List[str]:
 
 
 @dataclass
+class Writing:
+    """What this notebook is for, and where its output belongs.
+
+    Set when the notebook is made, and carried in the manifest, because the
+    answer differs per notebook and the notebook is the thing you pick up. One
+    book is a journal, another is fiction, another is blog drafts -- and they
+    want different destinations and different tools available. Keeping it here
+    means no marker has to be written on the page to say which is which.
+    """
+
+    #: A label for the kind of writing. Free text: it names a folder and it
+    #: appears in reports, and paper-log attaches no behaviour to any value.
+    kind: str = "notes"
+    #: Where transcripts go. Blank means beside the pages, as now.
+    transcripts: str = ""
+    #: Where tool output goes. Blank means under PAPERLOG_HOME.
+    outputs: str = ""
+    #: Which tools this notebook may call. Empty means all known tools.
+    tools: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Writing":
+        _reject_unknown(data, cls, "writing")
+        spec = cls(**data)
+        if not str(spec.kind).strip():
+            raise ConfigError("writing.kind cannot be blank")
+        if not isinstance(spec.tools, list) or not all(
+            isinstance(name, str) for name in spec.tools
+        ):
+            raise ConfigError("writing.tools must be a list of tool names")
+        return spec
+
+
+@dataclass
 class JournalConfig:
     notebook_id: str = field(default_factory=new_notebook_id)
     title: str = ""
@@ -425,6 +459,7 @@ class JournalConfig:
     qr: QrSpec = field(default_factory=QrSpec)
     fiducials: Fiducials = field(default_factory=Fiducials)
     furniture: Furniture = field(default_factory=Furniture)
+    writing: Writing = field(default_factory=Writing)
     imposition: str = "none"
     #: Draw the crop/fold guides that imposition implies.
     crop_marks: bool = True
@@ -490,6 +525,7 @@ class JournalConfig:
             "qr": QrSpec,
             "fiducials": Fiducials,
             "furniture": Furniture,
+            "writing": Writing,
         }
         for key, section_cls in sections.items():
             if key in data:

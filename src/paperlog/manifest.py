@@ -97,6 +97,15 @@ def build(config, pages: Sequence[Page]) -> Dict[str, Any]:
             "page_count": len(page_entries),
             "duplex": config.duplex,
         },
+        # Travels with the notebook because the notebook is what you pick up:
+        # `scan` and the tool runner read it back to know what this book is for
+        # and where its output belongs, without anything being written on a page.
+        "writing": {
+            "kind": config.writing.kind,
+            "transcripts": config.writing.transcripts,
+            "outputs": config.writing.outputs,
+            "tools": list(config.writing.tools),
+        },
         "page": {
             "width_mm": format_mm(width),
             "height_mm": format_mm(height),

@@ -198,6 +198,28 @@ def limits_for(model: str) -> Tuple[int, int]:
     return _match_limits(model) or CONSERVATIVE_LIMITS
 
 
+def encode_array(array, *, max_edge: int, max_pixels: int) -> Tuple[str, str, Tuple[int, int]]:
+    """Encode an in-memory image the same way a file on disk would be.
+
+    Used for a region cut out of a page: the crop never touches the filesystem,
+    which is one fewer place for the pixels around it to come back.
+    """
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - exercised by hand
+        raise VisionError(
+            "reading images needs Pillow: pip install 'paper-log[transcribe]'"
+        ) from exc
+    import numpy
+
+    data = numpy.asarray(array)
+    if data.ndim == 3:
+        image = Image.fromarray(data[:, :, ::-1], "RGB")
+    else:
+        image = Image.fromarray(data.astype("uint8"), "L")
+    return _encode(image, max_edge=max_edge, max_pixels=max_pixels)
+
+
 def encode_image(
     path: Path, *, max_edge: int, max_pixels: int
 ) -> Tuple[str, str, Tuple[int, int]]:
@@ -219,6 +241,12 @@ def encode_image(
         image.load()
     except Exception as exc:
         raise VisionError(f"cannot read {Path(path).name}: {exc}") from exc
+
+    return _encode(image, max_edge=max_edge, max_pixels=max_pixels)
+
+
+def _encode(image, *, max_edge: int, max_pixels: int) -> Tuple[str, str, Tuple[int, int]]:
+    from PIL import Image
 
     if image.mode not in ("L", "RGB"):
         image = image.convert("L")
@@ -310,27 +338,38 @@ class AnthropicBackend:
         return anthropic.Anthropic(**options)
 
     def read(self, *, media_type: str, data: str, system: str, instruction: str) -> Reply:
+        """Ask about an image."""
+        return self._send(
+            system,
+            [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                },
+                {"type": "text", "text": instruction},
+            ],
+        )
+
+    def ask(self, *, system: str, instruction: str) -> Reply:
+        """Ask in text alone, with no image in the request at all.
+
+        Used to run a tool on a prompt lifted off a page. The page is
+        deliberately absent: the request travels as the writer's words, and
+        nothing that was next to them on the paper travels with it.
+        """
+        return self._send(system, [{"type": "text", "text": instruction}])
+
+    def _send(self, system: str, content) -> Reply:
         message = self.client.messages.create(
             model=self.spec.model,
             max_tokens=self.spec.max_tokens,
             system=system,
             output_config={"effort": self.spec.effort},
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": data,
-                            },
-                        },
-                        {"type": "text", "text": instruction},
-                    ],
-                }
-            ],
+            messages=[{"role": "user", "content": content}],
         )
 
         # Read the stop reason before touching content: a refusal comes back as

@@ -97,6 +97,11 @@ paperlog scan photos/ --pdf notebook.pdf
 # 5. optional: turn the handwriting into text
 paperlog transcribe pages/K7M2QX/ -o notebook.md
 #    -> notebook.md, one section per page, in reading order
+
+# 6. optional: run the requests you boxed on the page
+paperlog calls pages/K7M2QX/                   # find them
+paperlog run                                   # answer them, overnight
+#    -> reports and widgets, filed where the notebook says
 ```
 
 Step 4 takes no arguments because of step 1: building a notebook files a copy
@@ -223,6 +228,103 @@ above before reaching for it on handwriting.
 > SDK's own types and a local server, so it will not fail on a malformed
 > request — but how well it reads *your* handwriting is something only your
 > handwriting can answer. Try a page before you queue a notebook.
+
+## Requests you write by hand
+
+Draw a box around something and it becomes a request, run later, filed where the
+notebook says.
+
+```
+  This is a test of the double pendulum
+  ┌─────────────────────────────────────┐
+  │ TOOL interactive-break              │
+  │ double pendulum viz, sliders for    │
+  │ the angles and relative masses,     │
+  │ click-drag to throw it around       │
+  └─────────────────────────────────────┘
+  The interesting thing about this is...
+```
+
+```console
+$ paperlog calls pages/PAPER1/          # find them
+  PAPER1-p0001F#0  interactive-break: double pendulum viz, sliders for
+found     1 new call(s), 0 already known, 0 page(s) failed
+
+$ paperlog run --dry-run                # check before spending
+  would run interactive-break  a69053da -> ~/blog/drafts/interactive-break/2026-08-21-double-pendulum-a69053da.html
+
+$ paperlog run                          # overnight
+```
+
+Two tools ship: `interactive-break` writes a self-contained HTML widget to embed
+in a post, and `research-request` writes a Markdown report with sources.
+`paperlog run --list-tools` lists them.
+
+### Why a drawn box
+
+A box is the cheapest mark a hand can make without breaking flow — no counting
+brackets, no spelling a keyword, no way to get it half right. That matters more
+than it sounds: the whole point of writing a request on paper is that it costs
+you nothing mid-thought, and any syntax fiddly enough to interrupt you defeats
+the exercise.
+
+It also turns out to be the most reliable thing to detect. Pen and printed ruling
+differ in *thickness* — the ruling is a fraction of a millimetre, a pen line
+several times that — so an erosion sized between them keeps one and drops the
+other. Tone would not work, because flattening pushes faint ruling to white in
+some places and leaves it grey in others. Underlines and margin rules survive
+the thickness test and are then rejected for not enclosing anything.
+
+### The request goes on alone
+
+**Nothing around the box reaches the model.** The box is cropped out of the page
+before anything reads it, and the crop is exactly the rectangle — never padded
+outward, because every pixel of padding is a chance for the line above to come
+along. Then the extracted prompt is dispatched by itself: no page, no
+surrounding prose, not even which notebook it came from.
+
+That is deliberate and it is the constraint the design is built around. A model
+that can see the paragraph around a request will tailor the request to fit it,
+and then the writing has quietly started steering the tool instead of the other
+way round. Two model calls rather than one, and a crop rather than a prompt
+instruction, are what make it a guarantee instead of a hope. If you *want*
+context, write it inside the box.
+
+### Written once, run once
+
+Rescanning a page is free. Every call carries an id derived from where it came
+from and what it asks, so photographing the same page again — which `scan`
+encourages, since it prefers a better shot — recognises the request instead of
+running it twice. The prompt is normalised before hashing, so a transcription
+that differs by a comma is the same call while a genuine rewrite is a new one.
+
+The ledger at `$PAPERLOG_HOME/calls.jsonl` records what is outstanding, what
+ran, and where the output went. `paperlog calls --list` reads it back;
+`paperlog run --retry` picks up what failed.
+
+### Because you are not there when it runs
+
+These run hours after you put the pen down, and there is no way to ask you a
+follow-up. Every tool contract therefore tells the model to decide rather than
+ask: pick the reading a careful colleague would pick, say at the top what it
+took the request to mean, and do the work. A tool that stops to ask a question
+has wasted the run.
+
+### Per notebook, not per page
+
+What a notebook is for, where its output goes, and which tools it may call are
+set when you build it, and travel in the manifest:
+
+```yaml
+writing:
+  kind: blog                    # names a folder, appears in reports
+  outputs: ~/blog/drafts        # where tool output lands
+  tools: [interactive-break]    # empty means all of them
+```
+
+So a fiction notebook cannot publish into your blog drafts, and nothing has to
+be written on a page to say which book this is. The notebook is the thing you
+pick up; it is the right place for the answer.
 
 ## The page identifier
 
